@@ -143,3 +143,7 @@ systemd/        plantilla del servicio de usuario
 install_hooks.py  instala/desinstala los hooks en ~/.claude/settings.json
 setup.sh        instalación en un equipo nuevo
 ```
+
+## Licencia
+
+[GPL-3.0](LICENSE): puedes usar, modificar y redistribuir este proyecto, pero las versiones derivadas que distribuyas deben publicarse también bajo GPL-3.0 con su código fuente.
