@@ -1,0 +1,14 @@
+[Unit]
+Description=claude4Telegram broker (Claude Code <-> Telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# setup.sh sustituye @DIR@ por la ruta del repo al instalar
+WorkingDirectory=@DIR@
+ExecStart=@DIR@/.venv/bin/python -m c4t
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
