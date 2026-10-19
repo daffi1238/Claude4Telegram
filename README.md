@@ -24,6 +24,14 @@ Solo en **modo fuera** (`/fuera`). En modo ordenador (`/aqui`) los hooks no espe
 
 Solo llega a Telegram lo que el terminal te habría preguntado. Los comandos de solo lectura (`ls`, `cat`…) y las sesiones en modo *auto*, *accept edits* o *bypass* no piden permiso.
 
+### Terminal y Telegram a la vez (tmux)
+
+Si la sesión de Claude Code corre dentro de **tmux**, gana quien responda primero:
+
+- Mientras una petición espera en Telegram, basta con **pulsar cualquier tecla en el pane de esa sesión** para soltarla: el mensaje de Telegram se cierra con "🖥 Respondido en el ordenador" y sigues en el terminal (en menos de 1 s).
+- Si has tecleado en ese pane en los últimos 2 minutos (`C4T_PRESENCE_WINDOW`), no se manda nada a Telegram: estás delante.
+- Fuera de tmux, la sesión espera a Telegram (o a `/aqui`) como siempre.
+
 ### Consultar el estado
 
 Escribe cualquier cosa ("¿cómo vas?") en el tema de un proyecto cuando no haya nada pendiente, o usa `/resumen`. El bot lee la transcripción de la sesión y responde al instante, sin gastar tokens:
@@ -48,6 +56,7 @@ Si hay varias sesiones activas en el proyecto, te deja elegir con un botón.
 
 ## Requisitos
 
+- tmux (opcional, recomendado: permite responder desde el terminal o Telegram, lo que llegue antes)
 - Linux con systemd (para el servicio; el broker en sí funciona en cualquier sistema con Python)
 - Python 3.10+
 - Claude Code 2.1 o superior (hooks `PermissionRequest` y `Stop` con `last_assistant_message`)
@@ -108,6 +117,7 @@ Hace una copia de seguridad de `~/.claude/settings.json` y solo añade sus propi
 | `TELEGRAM_OWNER_IDS` | Usuarios autorizados, separados por comas |
 | `C4T_SECRET` | Secreto compartido entre hooks y broker (lo genera `setup.sh`) |
 | `C4T_HOST` / `C4T_PORT` | Dónde escucha el broker (por defecto `127.0.0.1:8799`) |
+| `C4T_PRESENCE_WINDOW` | Segundos tras teclear en el pane tmux durante los que no se manda nada a Telegram (por defecto 120) |
 | `C4T_TOPIC_PREFIX` | Prefijo para los nombres de tema, útil con varios equipos |
 | `C4T_DANGER_EXTRA` | Regex extra de comandos Bash que nunca se aprueban desde Telegram, separadas por `;;` |
 | `C4T_STATE_DIR` | Estado persistente (por defecto `~/.local/state/claude4telegram`) |
@@ -143,7 +153,8 @@ rm ~/.config/systemd/user/claude4telegram.service
 
 ## Limitaciones
 
-- Mientras un hook espera tu respuesta, el terminal de esa sesión también espera. Usa `/aqui` al volver al ordenador.
+- Fuera de tmux, mientras un hook espera tu respuesta el terminal de esa sesión también espera. Usa `/aqui` al volver al ordenador.
+- Para soltar una petición desde el terminal hay que pulsar una tecla primero; esa pulsación puede no llegar al diálogo, así que respóndelo después.
 - Si se agota la espera del hook `Stop`, la sesión queda parada; retómala con `claude --resume`.
 - Claude Code corta la tarea tras 8 "Sigue trabajando" seguidos sin usar herramientas.
 

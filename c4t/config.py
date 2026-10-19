@@ -44,6 +44,7 @@ class Config:
     secret: str
     state_dir: Path
     topic_prefix: str = ""
+    presence_window: int = 120
     danger_patterns: list[str] = field(default_factory=list)
 
     @property
@@ -71,5 +72,6 @@ def load_config() -> Config:
         secret=secret,
         state_dir=Path(env.get("C4T_STATE_DIR", "~/.local/state/claude4telegram")).expanduser(),
         topic_prefix=env.get("C4T_TOPIC_PREFIX", ""),
+        presence_window=int(env.get("C4T_PRESENCE_WINDOW", "120")),
         danger_patterns=DEFAULT_DANGER + extra,
     )

@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-FORWARDED_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL")
+FORWARDED_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "TMUX", "TMUX_PANE")
 
 
 def load_env() -> dict[str, str]:
@@ -34,6 +34,8 @@ def project_name(cwd: str) -> str:
 
 
 def main() -> int:
+    if os.environ.get("C4T_DISABLE") == "1":
+        return 0
     timeout = 600
     if "--timeout" in sys.argv:
         timeout = int(sys.argv[sys.argv.index("--timeout") + 1])

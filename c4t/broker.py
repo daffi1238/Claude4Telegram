@@ -24,6 +24,7 @@ from aiohttp import web
 
 from .config import Config
 from .render import clip, esc, header, last_assistant_text, pre, provider_of, render_tool
+from .presence import typed_since
 from .state import State
 from .summary import ago, render_line, render_summary
 
@@ -32,6 +33,7 @@ log = logging.getLogger("c4t")
 TOPIC_COLORS = {"Claude": 16766590, "DeepSeek": 7322096}  # amarillo / azul
 DEFAULT_TOPIC_COLOR = 13338331                               # violeta
 QUIET_NOTIFICATIONS = {"permission_prompt", "idle_prompt"}   # ya cubiertos por PermissionRequest / Stop
+TERMINAL_POLL = 1.0                                          # s entre comprobaciones de tmux
 WAIT_MARGIN = 15                                             # s antes de que Claude Code mate el hook
 
 HELP = (
@@ -60,6 +62,7 @@ class Pending:
     text: str = ""            # HTML enviado, para poder editarlo al cerrar
     message_id: int | None = None
     data: dict = field(default_factory=dict)
+    tmux: dict | None = None  # pane de la sesión, para soltar el hook si tecleas en el terminal
     created: float = field(default_factory=time.time)
 
 
@@ -115,7 +118,8 @@ class Broker:
         """Envía una pregunta con botones; "{id}" en su callback_data se sustituye por el id de la petición."""
         req = Pending(
             id=secrets.token_hex(4), kind=kind, session_id=sess["id"], project=sess["project"],
-            thread_id=None, future=asyncio.get_running_loop().create_future(), text=text, data=data or {})
+            thread_id=None, future=asyncio.get_running_loop().create_future(), text=text, data=data or {},
+            tmux=sess.get("tmux"))
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [btn(b.text, b.callback_data.replace("{id}", req.id)) for b in row] for row in rows])
         msg = await self.send(sess["project"], sess["provider"], text, markup)
@@ -125,11 +129,21 @@ class Broker:
         return req
 
     async def wait(self, req: Pending, timeout: float):
+        """Espera la respuesta de Telegram; gana el terminal si tecleas en el pane de la sesión."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(timeout, 5)
         try:
-            return await asyncio.wait_for(asyncio.shield(req.future), max(timeout, 5))
-        except asyncio.TimeoutError:
-            await self.close_message(req, "⌛ Sin respuesta: decide en el ordenador")
-            return None
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    await self.close_message(req, "⌛ Sin respuesta: decide en el ordenador")
+                    return None
+                try:
+                    return await asyncio.wait_for(asyncio.shield(req.future), min(TERMINAL_POLL, remaining))
+                except asyncio.TimeoutError:
+                    if await typed_since(req.tmux, req.created):
+                        await self.close_message(req, "🖥 Respondido en el ordenador")
+                        return None
         except asyncio.CancelledError:
             # Claude Code cortó el hook (p. ej. se respondió en el terminal).
             asyncio.create_task(self.close_message(req, "🖥 Resuelto en el ordenador"))
@@ -180,6 +194,8 @@ class Broker:
             last_seen=time.time(),
         )
         sess.setdefault("model", env.get("ANTHROPIC_MODEL"))
+        if env.get("TMUX_PANE"):
+            sess["tmux"] = {"socket": (env.get("TMUX") or "").split(",")[0], "pane": env["TMUX_PANE"]}
         sess["provider"] = provider_of(sess.get("base_url"), sess.get("model"))
         self.state.sessions[sid] = sess
         return sess
@@ -210,6 +226,9 @@ class Broker:
         self.state.save()
         if not self.state.away:
             return None
+        if event in ("PermissionRequest", "PreToolUse", "Stop") and \
+                await typed_since(sess.get("tmux"), time.time() - self.cfg.presence_window):
+            return None  # estás tecleando en esa sesión: decide el terminal
         if event == "PermissionRequest":
             return await self.on_permission(payload, sess, head, timeout)
         if event == "PreToolUse" and payload.get("tool_name") == "AskUserQuestion":
