@@ -19,7 +19,7 @@ Solo en **modo fuera** (`/fuera`). En modo ordenador (`/aqui`) los hooks no espe
 |---|---|---|
 | 🔐 Permiso de herramienta | Permitir · Permitir siempre · Denegar · En el PC | Deniega y le dice a Claude qué hacer en su lugar |
 | ❓ Pregunta con opciones (`AskUserQuestion`) | Una por opción (multiselección con ☑️ + Confirmar) · En el PC | Respuesta libre ("Otra") |
-| 🏁 Claude ha terminado | Continúa · Dejar parado | Siguiente instrucción, y la sesión sigue |
+| 🏁 Claude ha terminado | Sigue trabajando · Listo, para aquí | Siguiente instrucción, y la sesión sigue |
 | 🔔 Otras notificaciones | — | — |
 
 Solo llega a Telegram lo que el terminal te habría preguntado. Los comandos de solo lectura (`ls`, `cat`…) y las sesiones en modo *auto*, *accept edits* o *bypass* no piden permiso.
@@ -145,7 +145,7 @@ rm ~/.config/systemd/user/claude4telegram.service
 
 - Mientras un hook espera tu respuesta, el terminal de esa sesión también espera. Usa `/aqui` al volver al ordenador.
 - Si se agota la espera del hook `Stop`, la sesión queda parada; retómala con `claude --resume`.
-- Claude Code corta la tarea tras 8 "Continúa" seguidos sin usar herramientas.
+- Claude Code corta la tarea tras 8 "Sigue trabajando" seguidos sin usar herramientas.
 
 ## Estructura
 

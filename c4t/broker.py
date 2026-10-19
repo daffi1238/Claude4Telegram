@@ -297,7 +297,7 @@ class Broker:
         msg = payload.get("last_assistant_message") or last_assistant_text(payload.get("transcript_path"))
         text = f"🏁 {head}\n<b>Claude ha terminado</b>\n\n{esc(clip(msg, 3000)) or '<i>(sin texto)</i>'}"
         text += "\n\n<i>Responde a este mensaje con la siguiente instrucción.</i>"
-        rows = [[btn("▶️ Continúa", "{id}:g"), btn("⏹ Dejar parado", "{id}:s")]]
+        rows = [[btn("▶️ Sigue trabajando", "{id}:g"), btn("✅ Listo, para aquí", "{id}:s")]]
         req = await self.ask("stop", sess, text, rows)
         if len(msg) > 3000:
             await self.send_file(sess["project"], sess["provider"], "respuesta.md", msg)
@@ -411,7 +411,7 @@ class Broker:
                 value, label = values[action]
                 await self.resolve(req, value, label)
             elif req.kind == "stop":
-                value, label = {"g": ("go", "▶️ Continúa"), "s": (None, "⏹ Parado")}[action]
+                value, label = {"g": ("go", "▶️ Sigue trabajando"), "s": (None, "✅ Listo, parado")}[action]
                 await self.resolve(req, value, label)
             elif req.kind == "question":
                 await self.on_question_button(cq, req, action)
