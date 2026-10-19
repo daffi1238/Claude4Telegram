@@ -25,6 +25,7 @@ from aiohttp import web
 from .config import Config
 from .render import clip, esc, header, last_assistant_text, pre, provider_of, render_tool
 from .state import State
+from .summary import ago, render_line, render_summary
 
 log = logging.getLogger("c4t")
 
@@ -38,6 +39,7 @@ HELP = (
     "/fuera — las decisiones de Claude Code llegan aquí\n"
     "/aqui — vuelves al ordenador (lo pendiente pasa al terminal)\n"
     "/estado — sesiones activas y peticiones pendientes\n"
+    "/resumen — qué está haciendo cada sesión (o escribe cualquier cosa en el tema)\n"
     "/id — ids de chat, usuario y tema\n\n"
     "Para texto libre, <b>responde</b> al mensaje del bot (o escribe en el tema si solo hay una pregunta pendiente)."
 )
@@ -173,6 +175,7 @@ class Broker:
         sess.update(
             project=body.get("project") or "sin-proyecto",
             cwd=payload.get("cwd", ""),
+            transcript_path=payload.get("transcript_path") or sess.get("transcript_path"),
             base_url=env.get("ANTHROPIC_BASE_URL") or sess.get("base_url"),
             last_seen=time.time(),
         )
@@ -357,6 +360,11 @@ class Broker:
                 lines.append("<i>Sin sesiones activas en las últimas 24 h.</i>")
             await m.reply("\n".join(lines))
 
+        @r.message(Command("resumen", "summary"))
+        async def cmd_summary(m: Message):
+            if self.allowed(m.chat.id, m.from_user.id):
+                await self.reply_summary(m)
+
         @r.message(F.text & ~F.text.startswith("/"))
         async def on_text(m: Message):
             if not self.allowed(m.chat.id, m.from_user.id):
@@ -372,9 +380,10 @@ class Broker:
                     await m.reply("Hay varias peticiones pendientes en este tema: <b>responde</b> al mensaje concreto.")
                     return
             if req is None:
-                # Con varios equipos en el mismo grupo, solo contesta el broker dueño del tema.
+                # Nada pendiente: el texto se toma como "¿cómo vas?". Con varios equipos en el
+                # mismo grupo, solo contesta el broker dueño del tema.
                 if m.message_thread_id in self.state.topics.values():
-                    await m.reply("No hay nada esperando respuesta aquí.")
+                    await self.reply_summary(m)
                 return
             labels = {"perm": "❌ Denegado con comentario", "question": "💬 Respuesta", "stop": "▶️ Nueva instrucción"}
             await self.resolve(req, {"text": m.text}, f"{labels[req.kind]}: {m.text}")
@@ -383,12 +392,18 @@ class Broker:
         @r.callback_query()
         async def on_button(cq: CallbackQuery):
             if not self.allowed(cq.message.chat.id, cq.from_user.id):
-                await cq.answer("No autorizado")
+                await self.ack(cq, "No autorizado")
                 return
             req_id, _, action = (cq.data or "").partition(":")
+            if req_id == "sum":
+                sess = next((s for s in self.state.sessions.values() if s["id"].startswith(action)), None)
+                if sess:
+                    await cq.message.reply(render_summary(sess, self.waiting_for(sess["id"])))
+                await self.ack(cq)
+                return
             req = self.pending.get(req_id)
             if req is None:
-                await cq.answer("Esta petición ya no está activa")
+                await self.ack(cq, "Esta petición ya no está activa")
                 return
             if req.kind == "perm":
                 values = {"a": ("allow", "✅ Permitido"), "A": ("always", "🔁 Permitido siempre"),
@@ -401,9 +416,44 @@ class Broker:
             elif req.kind == "question":
                 await self.on_question_button(cq, req, action)
                 return
-            await cq.answer()
+            await self.ack(cq)
 
         return r
+
+    @staticmethod
+    async def ack(cq: CallbackQuery, text: str | None = None) -> None:
+        try:
+            await cq.answer(text)
+        except TelegramBadRequest:
+            pass  # botón pulsado hace demasiado (p. ej. antes de reiniciar el broker)
+
+    # ------------------------------------------------------------------ resúmenes
+
+    def waiting_for(self, session_id: str) -> list[str]:
+        return [p.kind for p in self.pending.values() if p.session_id == session_id]
+
+    def recent_sessions(self, project: str | None = None) -> list[dict]:
+        """Sesiones abiertas en las últimas 24 h; si un proyecto no tiene ninguna, su última sesión."""
+        pool = [s for s in self.state.sessions.values() if project is None or s["project"] == project]
+        pool.sort(key=lambda s: -s.get("last_seen", 0))
+        active = [s for s in pool if not s.get("ended") and time.time() - s.get("last_seen", 0) < 86400]
+        return active or (pool[:1] if project else [])
+
+    async def reply_summary(self, m: Message) -> None:
+        project = next((p for p, t in self.state.topics.items() if t == m.message_thread_id), None)
+        sessions = self.recent_sessions(project)
+        if not sessions:
+            await m.reply("No hay sesiones registradas" + (" en este proyecto." if project else " en las últimas 24 h."))
+        elif project is None:
+            await m.reply("\n".join(["<b>Sesiones activas</b> (escribe en el tema de un proyecto para el detalle)", ""]
+                                    + [render_line(s, self.waiting_for(s["id"])) for s in sessions]))
+        elif len(sessions) == 1:
+            await m.reply(render_summary(sessions[0], self.waiting_for(sessions[0]["id"])))
+        else:
+            rows = [[btn(f"{s['provider']} · {s['id'][:6]} · {ago(s.get('last_seen'))}", f"sum:{s['id'][:8]}")]
+                    for s in sessions[:8]]
+            await m.reply(f"Hay {len(sessions)} sesiones activas en <b>{esc(project)}</b>. ¿Cuál?",
+                          reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
     async def on_question_button(self, cq: CallbackQuery, req: Pending, action: str) -> None:
         q, sel = req.data["q"], req.data["sel"]
@@ -412,7 +462,7 @@ class Broker:
             await self.resolve(req, None, "🖥 En el ordenador")
         elif action == "c":
             if not sel:
-                await cq.answer("Elige al menos una opción")
+                await self.ack(cq, "Elige al menos una opción")
                 return
             answer = ", ".join(labels[i] for i in sorted(sel))
             await self.resolve(req, answer, f"✔️ {answer}")
@@ -424,7 +474,7 @@ class Broker:
                 sel.symmetric_difference_update({idx})
                 markup = InlineKeyboardMarkup(inline_keyboard=self.question_rows(q, sel, req.id))
                 await cq.message.edit_reply_markup(reply_markup=markup)
-        await cq.answer()
+        await self.ack(cq)
 
 
 async def run(cfg: Config) -> None:
@@ -448,6 +498,7 @@ async def run(cfg: Config) -> None:
             BotCommand(command="fuera", description="Recibir decisiones aquí"),
             BotCommand(command="aqui", description="Volver al ordenador"),
             BotCommand(command="estado", description="Sesiones y pendientes"),
+            BotCommand(command="resumen", description="Qué está haciendo cada sesión"),
             BotCommand(command="id", description="Mostrar ids"),
         ])
 

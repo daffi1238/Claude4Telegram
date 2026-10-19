@@ -24,6 +24,18 @@ Solo en **modo fuera** (`/fuera`). En modo ordenador (`/aqui`) los hooks no espe
 
 Solo llega a Telegram lo que el terminal te habría preguntado. Los comandos de solo lectura (`ls`, `cat`…) y las sesiones en modo *auto*, *accept edits* o *bypass* no piden permiso.
 
+### Consultar el estado
+
+Escribe cualquier cosa ("¿cómo vas?") en el tema de un proyecto cuando no haya nada pendiente, o usa `/resumen`. El bot lee la transcripción de la sesión y responde al instante, sin gastar tokens:
+
+- estado: 🟢 trabajando, ⏳ esperando una decisión, 💤 parada (desde cuándo) o ⚪ cerrada
+- título de la sesión, rama git y modo de permisos
+- tu última instrucción y la lista de tareas de Claude, si la usa
+- ficheros modificados y últimos comandos
+- el último mensaje de Claude
+
+Si hay varias sesiones activas en el proyecto, te deja elegir con un botón.
+
 ### Comandos del bot
 
 | Comando | Efecto |
@@ -31,6 +43,7 @@ Solo llega a Telegram lo que el terminal te habría preguntado. Los comandos de 
 | `/fuera` | Las decisiones llegan a Telegram y Claude espera tu respuesta |
 | `/aqui` | Vuelves al ordenador: lo pendiente pasa al terminal |
 | `/estado` | Sesiones activas y qué espera cada una |
+| `/resumen` | Qué está haciendo cada sesión (en un tema: detalle del proyecto; en General: una línea por sesión) |
 | `/id` | Ids de chat, usuario y tema |
 
 ## Requisitos
