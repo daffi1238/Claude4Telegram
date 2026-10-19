@@ -54,6 +54,24 @@ Si hay varias sesiones activas en el proyecto, te deja elegir con un botón.
 | `/resumen` | Qué está haciendo cada sesión (en un tema: detalle del proyecto; en General: una línea por sesión) |
 | `/id` | Ids de chat, usuario y tema |
 
+## Enviar archivos desde los proyectos
+
+Cualquier proyecto (o Claude dentro de él) puede mandar mensajes y archivos a su tema de Telegram:
+
+```bash
+python3 ~/Claude4Telegram/hooks/c4t_send.py --texto "Tests en verde"
+python3 ~/Claude4Telegram/hooks/c4t_send.py --file portada.png --texto "Portada v3"
+python3 ~/Claude4Telegram/hooks/c4t_send.py -f a.png -f b.png --proyecto ComicSanlucar
+python3 ~/Claude4Telegram/hooks/c4t_send.py --file nota.ogg --como voice
+```
+
+- El tema sale de la raíz git del directorio actual, igual que para los permisos; `--proyecto` lo cambia.
+- El tipo se deduce de la extensión: foto (JPG/PNG/WebP hasta 10 MB), GIF animado, nota de voz (`.ogg`/`.opus`), audio, vídeo (`.mp4`/`.mov`/`.webm`) o documento para todo lo demás. `--como` lo fuerza, y si Telegram rechaza el formato se reintenta como documento.
+- Límite de 50 MB por archivo (el de la Bot API de Telegram).
+- Se envía siempre, aunque estés en modo ordenador, y no espera respuesta.
+- El comando manda los bytes al broker (`POST /send`, con `C4T_SECRET`); el broker nunca lee archivos del disco por su cuenta.
+- Si el broker no está disponible, avisa y sale con código 1.
+
 ## Requisitos
 
 - tmux (opcional, recomendado: permite responder desde el terminal o Telegram, lo que llegue antes)
@@ -162,7 +180,7 @@ rm ~/.config/systemd/user/claude4telegram.service
 
 ```
 c4t/            broker: bot de Telegram + servidor HTTP local
-hooks/          hook que ejecuta Claude Code (solo librería estándar)
+hooks/          hook que ejecuta Claude Code y c4t_send.py (solo librería estándar)
 systemd/        plantilla del servicio de usuario
 install_hooks.py  instala/desinstala los hooks en ~/.claude/settings.json
 setup.sh        instalación en un equipo nuevo

@@ -5,6 +5,7 @@ en Telegram, se agota el tiempo o vuelves al ordenador (/aqui). Sin decisión, C
 sigue su flujo normal en el terminal.
 """
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -24,6 +25,7 @@ from aiohttp import web
 
 from .config import Config
 from .render import clip, esc, header, last_assistant_text, pre, provider_of, render_tool
+from .media import MAX_UPLOAD, send_media
 from .presence import typed_since
 from .state import State
 from .summary import ago, render_line, render_summary
@@ -164,6 +166,34 @@ class Broker:
                 chat_id=self.cfg.chat_id, message_id=req.message_id, reply_markup=None)
         except TelegramBadRequest as e:
             log.debug("no se pudo editar %s: %s", req.message_id, e)
+
+    # ------------------------------------------------------------------ HTTP (envío desde proyectos)
+
+    async def http_send(self, request: web.Request) -> web.Response:
+        """Mensajes y archivos que un proyecto manda al tema de Telegram (c4t_send.py). No espera respuesta."""
+        if not secrets.compare_digest(request.headers.get("X-C4T-Secret", ""), self.cfg.secret):
+            return web.json_response({"error": "forbidden"}, status=403)
+        if not self.cfg.configured:
+            return web.json_response({"error": "broker sin configurar"}, status=503)
+        body = await request.json()
+        project = body.get("project") or "sin-proyecto"
+        last = max((s for s in self.state.sessions.values() if s["project"] == project),
+                   key=lambda s: s.get("last_seen", 0), default={})
+        provider = last.get("provider", "Claude")
+        caption = f"📎 <b>{esc(project)}</b>" + (f"\n{esc(body['text'])}" if body.get("text") else "")
+        try:
+            if not body.get("data_b64"):
+                await self.send(project, provider, caption)
+                return web.json_response({"ok": True})
+            data = base64.b64decode(body["data_b64"])
+            if len(data) > MAX_UPLOAD:
+                return web.json_response({"error": "el archivo supera 50 MB"}, status=413)
+            thread = await self.topic_for(project, provider)
+            msg = await send_media(self.bot, self.cfg.chat_id, thread, body.get("filename") or "archivo",
+                                   data, caption, body.get("kind"))
+            return web.json_response({"ok": True, "message_id": msg.message_id})
+        except TelegramBadRequest as e:
+            return web.json_response({"error": str(e)}, status=502)
 
     # ------------------------------------------------------------------ HTTP (hooks)
 
@@ -498,8 +528,9 @@ class Broker:
 
 async def run(cfg: Config) -> None:
     broker = Broker(cfg)
-    app = web.Application()
+    app = web.Application(client_max_size=MAX_UPLOAD * 4 // 3 + 1024 * 1024)  # base64 + margen
     app.router.add_post("/hook", broker.http_hook)
+    app.router.add_post("/send", broker.http_send)
     app.router.add_get("/health", lambda _: web.json_response({"ok": True, "away": broker.state.away}))
     runner = web.AppRunner(app)
     await runner.setup()
