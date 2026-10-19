@@ -55,6 +55,7 @@ def main() -> int:
             "PermissionRequest": ("*", args.wait),
             "PreToolUse": ("AskUserQuestion", args.wait),
             "Stop": (None, args.wait),
+            "UserPromptSubmit": (None, 10),
             "Notification": (None, 10),
         }
         for event, (matcher, timeout) in events.items():

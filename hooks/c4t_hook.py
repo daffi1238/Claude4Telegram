@@ -25,12 +25,16 @@ def load_env() -> dict[str, str]:
     return values
 
 
-def project_name(cwd: str) -> str:
+def project_root(cwd: str) -> Path:
     path = Path(cwd or ".").resolve()
     for candidate in (path, *path.parents):
         if (candidate / ".git").exists():
-            return candidate.name
-    return path.name or "sin-proyecto"
+            return candidate
+    return path
+
+
+def project_name(cwd: str) -> str:
+    return project_root(cwd).name or "sin-proyecto"
 
 
 def main() -> int:
@@ -47,6 +51,7 @@ def main() -> int:
     body = {
         "payload": payload,
         "project": project_name(payload.get("cwd", "")),
+        "project_root": str(project_root(payload.get("cwd", ""))),
         "env": {k: os.environ.get(k) for k in FORWARDED_ENV},
         "timeout": timeout,
     }

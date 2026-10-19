@@ -72,9 +72,48 @@ python3 ~/Claude4Telegram/hooks/c4t_send.py --file nota.ogg --como voice
 - El comando manda los bytes al broker (`POST /send`, con `C4T_SECRET`); el broker nunca lee archivos del disco por su cuenta.
 - Si el broker no está disponible, avisa y sale con código 1.
 
+## Enviar archivos al proyecto desde Telegram
+
+Manda una foto, nota de voz, audio, vídeo o documento **en el tema del proyecto**. El broker lo guarda en `<proyecto>/.c4t/inbox/` (la carpeta `.c4t/` se ignora sola en git) y se lo entrega a Claude con la ruta y tu comentario (el pie del mensaje):
+
+- Si la sesión está esperando en un 🏁 (o respondes a ese mensaje con el archivo), Claude lo recibe al momento y sigue trabajando.
+- Si no, queda en cola y lo recibe en cuanto le escribas o termine lo que está haciendo.
+- Límite de 20 MB por archivo (el de descarga de la Bot API).
+
+### Archivos cifrados
+
+Para que Telegram solo vea el archivo cifrado, cífralo en el móvil y configura la contraseña **en el equipo** (nunca pasa por Telegram):
+
+```bash
+python3 ~/Claude4Telegram/hooks/c4t_key.py                 # contraseña del proyecto actual
+python3 ~/Claude4Telegram/hooks/c4t_key.py --global        # la que se usa si el proyecto no tiene la suya
+python3 ~/Claude4Telegram/hooks/c4t_key.py --lista | --borrar
+```
+
+| Formato | Ejemplos de app | Resultado |
+|---|---|---|
+| ZIP con AES o `.7z` con contraseña | ZArchiver (Android), 7-Zip | Se extrae a una carpeta |
+| `.gpg` / `.pgp` / `.asc` simétrico | OpenKeychain (Android), `gpg -c` | Se descifra el archivo |
+
+- Las contraseñas se guardan en `~/.local/state/claude4telegram/keys/` con permisos `600`, y se pasan a `gpg`/`7z` por stdin (no aparecen en la lista de procesos).
+- Si falta la contraseña o no es la correcta, el archivo se guarda cifrado, Claude no lo recibe y el bot te dice qué hacer.
+- Los `.zip` sin cifrar se dejan tal cual, sin extraer.
+- Ojo: el archivo descifrado queda en el disco del proyecto, al alcance de Claude.
+
+## Cómo se entera cada sesión
+
+Claude Code solo habla con el broker a través de los hooks, así que el broker no puede meter nada en una sesión cuando quiere: aprovecha el siguiente hook.
+
+| Hook | Qué recibe Claude |
+|---|---|
+| `SessionStart` | Instrucciones para usar `c4t_send.py` con su proyecto y dónde llegarán tus archivos |
+| `UserPromptSubmit` | Lo mismo la primera vez en sesiones abiertas antes de instalar, y los archivos en cola |
+| `Stop` | Los archivos en cola (la sesión sigue trabajando con ellos) |
+
 ## Requisitos
 
 - tmux (opcional, recomendado: permite responder desde el terminal o Telegram, lo que llegue antes)
+- `gpg` y `7z` (p7zip) para descifrar archivos (opcional)
 - Linux con systemd (para el servicio; el broker en sí funciona en cualquier sistema con Python)
 - Python 3.10+
 - Claude Code 2.1 o superior (hooks `PermissionRequest` y `Stop` con `last_assistant_message`)
@@ -180,7 +219,7 @@ rm ~/.config/systemd/user/claude4telegram.service
 
 ```
 c4t/            broker: bot de Telegram + servidor HTTP local
-hooks/          hook que ejecuta Claude Code y c4t_send.py (solo librería estándar)
+hooks/          hook de Claude Code, c4t_send.py y c4t_key.py (solo librería estándar)
 systemd/        plantilla del servicio de usuario
 install_hooks.py  instala/desinstala los hooks en ~/.claude/settings.json
 setup.sh        instalación en un equipo nuevo

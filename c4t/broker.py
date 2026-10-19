@@ -12,6 +12,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -25,6 +26,8 @@ from aiohttp import web
 
 from .config import Config
 from .render import clip, esc, header, last_assistant_text, pre, provider_of, render_tool
+from .inbox import describe_for_claude, inbox_dir, key_for, session_context, stamped
+from .inbox import process as process_incoming
 from .media import MAX_UPLOAD, send_media
 from .presence import typed_since
 from .state import State
@@ -35,6 +38,7 @@ log = logging.getLogger("c4t")
 TOPIC_COLORS = {"Claude": 16766590, "DeepSeek": 7322096}  # amarillo / azul
 DEFAULT_TOPIC_COLOR = 13338331                               # violeta
 QUIET_NOTIFICATIONS = {"permission_prompt", "idle_prompt"}   # ya cubiertos por PermissionRequest / Stop
+TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024                    # getFile de la Bot API
 TERMINAL_POLL = 1.0                                          # s entre comprobaciones de tmux
 WAIT_MARGIN = 15                                             # s antes de que Claude Code mate el hook
 
@@ -219,6 +223,7 @@ class Broker:
         sess.update(
             project=body.get("project") or "sin-proyecto",
             cwd=payload.get("cwd", ""),
+            root=body.get("project_root") or sess.get("root") or payload.get("cwd", ""),
             transcript_path=payload.get("transcript_path") or sess.get("transcript_path"),
             base_url=env.get("ANTHROPIC_BASE_URL") or sess.get("base_url"),
             last_seen=time.time(),
@@ -245,7 +250,13 @@ class Broker:
             model = f" · {esc(sess['model'])}" if sess.get("model") else ""
             await self.send(sess["project"], sess["provider"],
                             f"🟢 {head}\nSesión ({esc(payload.get('source', 'startup'))}){model}", silent=True)
-            return None
+            context = session_context(sess["project"], sess["root"])
+            sess["context_sent"] = True
+            notices = self.state.inbox.pop(sess["project"], [])
+            if notices:
+                self.state.save()
+                context += "\n\n" + "\n\n".join(notices)
+            return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}
         if event == "SessionEnd":
             sess["ended"] = True
             self.state.save()
@@ -254,6 +265,22 @@ class Broker:
             return None
 
         self.state.save()
+        # Archivos recibidos por Telegram que Claude aún no conoce: se entregan en cuanto la sesión
+        # da señales (al escribirle tú o al terminar una tarea), estés fuera o delante del ordenador.
+        if event == "UserPromptSubmit":
+            # Sesiones abiertas antes de instalar Claude4Telegram: se enteran en tu siguiente mensaje.
+            parts = [] if sess.get("context_sent") else [session_context(sess["project"], sess["root"])]
+            sess["context_sent"] = True
+            parts += self.state.inbox.pop(sess["project"], [])
+            self.state.save()
+            if parts:
+                return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                               "additionalContext": "\n\n".join(parts)}}
+            return None
+        if event == "Stop" and self.state.inbox.get(sess["project"]):
+            notices = "\n\n".join(self.state.inbox.pop(sess["project"]))
+            self.state.save()
+            return {"decision": "block", "reason": notices}
         if not self.state.away:
             return None
         if event in ("PermissionRequest", "PreToolUse", "Stop") and \
@@ -409,6 +436,11 @@ class Broker:
                 lines.append("<i>Sin sesiones activas en las últimas 24 h.</i>")
             await m.reply("\n".join(lines))
 
+        @r.message(F.document | F.photo | F.voice | F.audio | F.video | F.video_note | F.animation)
+        async def on_file(m: Message):
+            if self.allowed(m.chat.id, m.from_user.id):
+                await self.receive_file(m)
+
         @r.message(Command("resumen", "summary"))
         async def cmd_summary(m: Message):
             if self.allowed(m.chat.id, m.from_user.id):
@@ -475,6 +507,58 @@ class Broker:
             await cq.answer(text)
         except TelegramBadRequest:
             pass  # botón pulsado hace demasiado (p. ej. antes de reiniciar el broker)
+
+    # ------------------------------------------------------------------ archivos desde Telegram
+
+    async def receive_file(self, m: Message) -> None:
+        project = next((p for p, t in self.state.topics.items() if t == m.message_thread_id), None)
+        if project is None:
+            if m.message_thread_id is None:
+                await m.reply("Envía el archivo en el tema del proyecto al que va dirigido.")
+            return  # tema de otro equipo
+        sess = max((s for s in self.state.sessions.values() if s["project"] == project and s.get("root")),
+                   key=lambda s: s.get("last_seen", 0), default=None)
+        if sess is None:
+            await m.reply("Aún no sé en qué carpeta está este proyecto: abre una sesión de Claude Code en él.")
+            return
+        media = m.document or m.audio or m.video or m.animation or m.voice or m.video_note or (m.photo or [None])[-1]
+        default_names = {"voice": "nota_de_voz.ogg", "video_note": "video_nota.mp4", "photo": "foto.jpg"}
+        name = getattr(media, "file_name", None) or default_names.get(m.content_type, f"{m.content_type}.bin")
+        if (media.file_size or 0) > TELEGRAM_DOWNLOAD_LIMIT:
+            await m.reply("Telegram no deja a los bots descargar archivos de más de 20 MB. "
+                          "Pártelo o comprímelo (un .7z cifrado también vale).")
+            return
+        inbox = inbox_dir(sess["root"])
+        dest = stamped(inbox, name)
+        await self.bot.download(media, destination=dest)
+        item = await process_incoming(dest, key_for(self.cfg.state_dir / "keys", project))
+        rel = esc(item.path.relative_to(Path(sess["root"])))
+        size = sum(p.stat().st_size for p in item.path.rglob("*") if p.is_file()) if item.path.is_dir() \
+            else item.path.stat().st_size
+        icon = {"decrypted": " · 🔓 descifrado", "plain": ""}.get(item.status, "")
+        if not item.usable:
+            key_cmd = f"python3 {Path(__file__).resolve().parent.parent / 'hooks' / 'c4t_key.py'} --proyecto \"{project}\""
+            reason = {"no_key": "🔒 Está cifrado y este proyecto no tiene contraseña configurada.",
+                      "wrong_key": "🔒 La contraseña configurada no lo descifra.",
+                      "error": f"⚠️ No se pudo descifrar: {esc(item.detail)}"}[item.status]
+            await m.reply(f"📥 Guardado en <code>{rel}</code>, pero Claude no lo recibirá todavía.\n{reason}\n"
+                          f"En el ordenador: <code>{esc(key_cmd)}</code> y reenvíalo.")
+            return
+        notice = describe_for_claude(item, m.caption)
+        stop = None
+        if m.reply_to_message and m.reply_to_message.message_id in self.msg_to_req:
+            stop = self.pending.get(self.msg_to_req[m.reply_to_message.message_id])
+        if stop is None or stop.kind != "stop":
+            stops = [p for p in self.pending.values() if p.kind == "stop" and p.thread_id == m.message_thread_id]
+            stop = stops[0] if len(stops) == 1 else None
+        if stop:
+            await self.resolve(stop, {"text": notice}, "📥 Archivo enviado a Claude")
+            where = "Claude ya lo tiene y sigue trabajando."
+        else:
+            self.state.inbox.setdefault(project, []).append(notice)
+            self.state.save()
+            where = "Claude lo recibirá en cuanto termine lo que está haciendo o le escribas."
+        await m.reply(f"📥 <code>{rel}</code> ({size // 1024 or 1} KB){icon}\n{where}")
 
     # ------------------------------------------------------------------ resúmenes
 
