@@ -31,6 +31,15 @@ def safe_name(name: str) -> str:
     return name[:120] or "archivo"
 
 
+def git_root(cwd: str) -> Path:
+    """Raíz git del directorio (igual que project_root() del hook), o el propio directorio."""
+    path = Path(cwd).resolve()
+    for candidate in (path, *path.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return path
+
+
 def inbox_dir(root: str) -> Path:
     base = Path(root) / ".c4t"
     inbox = base / "inbox"

@@ -26,7 +26,7 @@ from aiohttp import web
 
 from .config import Config
 from .render import clip, esc, header, last_assistant_text, pre, provider_of, render_tool
-from .inbox import describe_for_claude, inbox_dir, key_for, session_context, stamped
+from .inbox import describe_for_claude, git_root, inbox_dir, key_for, session_context, stamped
 from .inbox import process as process_incoming
 from .media import MAX_UPLOAD, send_media
 from .presence import typed_since
@@ -516,9 +516,13 @@ class Broker:
             if m.message_thread_id is None:
                 await m.reply("Envía el archivo en el tema del proyecto al que va dirigido.")
             return  # tema de otro equipo
-        sess = max((s for s in self.state.sessions.values() if s["project"] == project and s.get("root")),
+        sess = max((s for s in self.state.sessions.values() if s["project"] == project and (s.get("root") or s.get("cwd"))),
                    key=lambda s: s.get("last_seen", 0), default=None)
-        if sess is None:
+        if sess is not None and not sess.get("root"):
+            # Sesión registrada antes de que el hook mandara la raíz: se deduce de su cwd.
+            root = git_root(sess["cwd"])
+            sess["root"] = str(root if root.name == project else Path(sess["cwd"]))
+        if sess is None or not Path(sess["root"]).is_dir():
             await m.reply("Aún no sé en qué carpeta está este proyecto: abre una sesión de Claude Code en él.")
             return
         media = m.document or m.audio or m.video or m.animation or m.voice or m.video_note or (m.photo or [None])[-1]
