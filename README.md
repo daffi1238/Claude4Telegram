@@ -44,6 +44,11 @@ Escribe cualquier cosa ("¿cómo vas?") en el tema de un proyecto cuando no haya
 
 Si hay varias sesiones activas en el proyecto, te deja elegir con un botón.
 
+Debajo del resumen hay un botón **🧠 Resumen IA**: manda un extracto de la conversación (tus instrucciones, las respuestas de Claude y las herramientas usadas, unos 40 000 caracteres como máximo) a `claude -p` sin herramientas y te devuelve objetivo, hecho, estado, pendiente y siguiente paso. Este sí gasta tokens:
+
+- Se lanza en la carpeta del proyecto, así que usa su misma configuración: en un proyecto DeepSeek resume DeepSeek con el modelo del proyecto; en uno Claude, `haiku` (`C4T_SUMMARY_MODEL`).
+- No se guarda como sesión ni dispara los hooks de claude4Telegram.
+
 ### Comandos del bot
 
 | Comando | Efecto |
@@ -69,6 +74,7 @@ python3 ~/Claude4Telegram/hooks/c4t_send.py --file nota.ogg --como voice
 - El tipo se deduce de la extensión: foto (JPG/PNG/WebP hasta 10 MB), GIF animado, nota de voz (`.ogg`/`.opus`), audio, vídeo (`.mp4`/`.mov`/`.webm`) o documento para todo lo demás. `--como` lo fuerza, y si Telegram rechaza el formato se reintenta como documento.
 - Límite de 50 MB por archivo (el de la Bot API de Telegram).
 - Se envía siempre, aunque estés en modo ordenador, y no espera respuesta.
+- `install_hooks.py` añade a `permissions.allow` la regla `Bash(python3 <repo>/hooks/c4t_send.py:*)`, así Claude puede enviar sin pedirte permiso. `--uninstall` la quita.
 - El comando manda los bytes al broker (`POST /send`, con `C4T_SECRET`); el broker nunca lee archivos del disco por su cuenta.
 - Si el broker no está disponible, avisa y sale con código 1.
 
@@ -178,6 +184,8 @@ Hace una copia de seguridad de `~/.claude/settings.json` y solo añade sus propi
 | `C4T_TOPIC_PREFIX` | Prefijo para los nombres de tema, útil con varios equipos |
 | `C4T_DANGER_EXTRA` | Regex extra de comandos Bash que nunca se aprueban desde Telegram, separadas por `;;` |
 | `C4T_STATE_DIR` | Estado persistente (por defecto `~/.local/state/claude4telegram`) |
+| `C4T_SUMMARY_MODEL` | Modelo del 🧠 Resumen IA en proyectos Claude (por defecto `haiku`; vacío = el configurado) |
+| `C4T_CLAUDE_BIN` | Ruta al comando `claude` si el servicio no lo encuentra (busca en el PATH y en `~/.local/bin`) |
 
 ## Varios equipos
 

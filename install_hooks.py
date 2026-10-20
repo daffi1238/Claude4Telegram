@@ -16,6 +16,9 @@ from pathlib import Path
 
 HOOK = Path(__file__).resolve().parent / "hooks" / "c4t_hook.py"
 MARKER = "c4t_hook.py"
+SEND = HOOK.with_name("c4t_send.py")
+# Enviar al propio tema de Telegram no pide permiso (es el comando que se le enseña a cada sesión).
+SEND_RULE = f"Bash(python3 {SEND}:*)"
 
 
 def main() -> int:
@@ -70,9 +73,20 @@ def main() -> int:
 
     if not hooks:
         settings.pop("hooks", None)
+
+    permissions = settings.setdefault("permissions", {})
+    allow = [rule for rule in permissions.get("allow", []) if SEND.name not in rule]
+    if not args.uninstall:
+        allow.append(SEND_RULE)
+    if allow:
+        permissions["allow"] = allow
+    else:
+        permissions.pop("allow", None)
+    if not permissions:
+        settings.pop("permissions")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
-    print("Hooks desinstalados." if args.uninstall else f"Hooks instalados en {path}.")
+    print("Hooks desinstalados." if args.uninstall else f"Hooks instalados en {path} (y permiso para {SEND.name}).")
     print("Reinicia las sesiones de Claude Code abiertas para que los carguen.")
     return 0
 

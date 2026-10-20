@@ -31,7 +31,8 @@ from .inbox import process as process_incoming
 from .media import MAX_UPLOAD, send_media
 from .presence import typed_since
 from .state import State
-from .summary import ago, render_line, render_summary
+from .summary import ago, md_bold, render_line, render_summary, transcript_of
+from .ai_summary import summarize
 
 log = logging.getLogger("c4t")
 
@@ -47,7 +48,8 @@ HELP = (
     "/fuera — las decisiones de Claude Code llegan aquí\n"
     "/aqui — vuelves al ordenador (lo pendiente pasa al terminal)\n"
     "/estado — sesiones activas y peticiones pendientes\n"
-    "/resumen — qué está haciendo cada sesión (o escribe cualquier cosa en el tema)\n"
+    "/resumen — qué está haciendo cada sesión (o escribe cualquier cosa en el tema); "
+    "con 🧠 Resumen IA, un modelo te lo resume\n"
     "/id — ids de chat, usuario y tema\n\n"
     "Para texto libre, <b>responde</b> al mensaje del bot (o escribe en el tema si solo hay una pregunta pendiente)."
 )
@@ -82,6 +84,7 @@ class Broker:
         self.msg_to_req: dict[int, str] = {}
         self.topic_lock = asyncio.Lock()
         self.danger = [re.compile(p, re.IGNORECASE) for p in cfg.danger_patterns]
+        self.ai_running: set[str] = set()   # sesiones con un 🧠 Resumen IA en marcha
 
     # ------------------------------------------------------------------ Telegram helpers
 
@@ -476,11 +479,16 @@ class Broker:
                 await self.ack(cq, "No autorizado")
                 return
             req_id, _, action = (cq.data or "").partition(":")
-            if req_id == "sum":
+            if req_id in ("sum", "ai"):
                 sess = next((s for s in self.state.sessions.values() if s["id"].startswith(action)), None)
-                if sess:
-                    await cq.message.reply(render_summary(sess, self.waiting_for(sess["id"])))
-                await self.ack(cq)
+                if sess is None:
+                    await self.ack(cq, "Ya no tengo esa sesión")
+                elif req_id == "sum":
+                    await cq.message.reply(render_summary(sess, self.waiting_for(sess["id"])),
+                                           reply_markup=self.summary_markup(sess))
+                    await self.ack(cq)
+                else:
+                    await self.ai_summary(cq, sess)
                 return
             req = self.pending.get(req_id)
             if req is None:
@@ -585,12 +593,41 @@ class Broker:
             await m.reply("\n".join(["<b>Sesiones activas</b> (escribe en el tema de un proyecto para el detalle)", ""]
                                     + [render_line(s, self.waiting_for(s["id"])) for s in sessions]))
         elif len(sessions) == 1:
-            await m.reply(render_summary(sessions[0], self.waiting_for(sessions[0]["id"])))
+            await m.reply(render_summary(sessions[0], self.waiting_for(sessions[0]["id"])),
+                          reply_markup=self.summary_markup(sessions[0]))
         else:
             rows = [[btn(f"{s['provider']} · {s['id'][:6]} · {ago(s.get('last_seen'))}", f"sum:{s['id'][:8]}")]
                     for s in sessions[:8]]
             await m.reply(f"Hay {len(sessions)} sesiones activas en <b>{esc(project)}</b>. ¿Cuál?",
                           reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+    @staticmethod
+    def summary_markup(sess: dict) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[[btn("🧠 Resumen IA", f"ai:{sess['id'][:8]}")]])
+
+    async def ai_summary(self, cq: CallbackQuery, sess: dict) -> None:
+        if sess["id"] in self.ai_running:
+            await self.ack(cq, "Ya lo estoy generando…")
+            return
+        transcript = transcript_of(sess)
+        if not transcript or not Path(transcript).exists():
+            await self.ack(cq, "No encuentro la transcripción de esta sesión")
+            return
+        self.ai_running.add(sess["id"])
+        await self.ack(cq, "Generando resumen…")
+        note = await cq.message.reply(f"🧠 Resumiendo con {esc(sess['provider'])}…")
+        try:
+            text = await summarize(sess, transcript, self.cfg.summary_model, self.cfg.claude_bin)
+            body = f"🧠 {header(sess['project'], sess['provider'], sess['id'])}\n\n{md_bold(esc(clip(text, 3500)))}"
+        except Exception as e:  # el error se enseña en Telegram, no debe tumbar el broker
+            log.warning("Resumen IA de %s: %s", sess["id"], e)
+            body = f"⚠️ No se pudo generar el resumen IA: {esc(clip(str(e), 500))}"
+        finally:
+            self.ai_running.discard(sess["id"])
+        try:
+            await note.edit_text(body)
+        except TelegramBadRequest:
+            await cq.message.reply(body)
 
     async def on_question_button(self, cq: CallbackQuery, req: Pending, action: str) -> None:
         q, sel = req.data["q"], req.data["sel"]

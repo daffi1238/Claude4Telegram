@@ -46,6 +46,8 @@ class Config:
     topic_prefix: str = ""
     presence_window: int = 120
     danger_patterns: list[str] = field(default_factory=list)
+    summary_model: str = "haiku"   # modelo del 🧠 Resumen IA en proyectos Claude ("" = el del proyecto)
+    claude_bin: str = ""           # ruta a claude si no está en el PATH del servicio
 
     @property
     def configured(self) -> bool:
@@ -74,4 +76,6 @@ def load_config() -> Config:
         topic_prefix=env.get("C4T_TOPIC_PREFIX", ""),
         presence_window=int(env.get("C4T_PRESENCE_WINDOW", "120")),
         danger_patterns=DEFAULT_DANGER + extra,
+        summary_model=env.get("C4T_SUMMARY_MODEL", "haiku"),
+        claude_bin=env.get("C4T_CLAUDE_BIN", ""),
     )
