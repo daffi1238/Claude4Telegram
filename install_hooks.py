@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Instala (o desinstala) los hooks de claude4Telegram en ~/.claude/settings.json.
 
-    python3 install_hooks.py               # instalar (espera máx. 30 min por decisión)
-    python3 install_hooks.py --wait 3600   # esperar hasta 1 h
+    python3 install_hooks.py               # instalar (espera máx. 24 h por decisión)
+    python3 install_hooks.py --wait 1800   # esperar solo 30 min
     python3 install_hooks.py --uninstall
 
 Hace copia de seguridad del settings.json y es idempotente: solo toca sus propias entradas.
@@ -24,7 +24,7 @@ SEND_RULE = f"Bash(python3 {SEND}:*)"
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--settings", default="~/.claude/settings.json")
-    ap.add_argument("--wait", type=int, default=1800, help="segundos máximos esperando respuesta en Telegram")
+    ap.add_argument("--wait", type=int, default=86400, help="segundos máximos esperando respuesta en Telegram")
     ap.add_argument("--uninstall", action="store_true")
     args = ap.parse_args()
 

@@ -166,7 +166,7 @@ journalctl --user -u claude4telegram -f
 ### 6. Instalar los hooks
 
 ```bash
-python3 install_hooks.py              # --wait 3600 para esperar hasta 1 h por decisión (por defecto 30 min)
+python3 install_hooks.py              # espera hasta 24 h por decisión (--wait 1800 para solo 30 min)
 ```
 
 Hace una copia de seguridad de `~/.claude/settings.json` y solo añade sus propias entradas. Reinicia las sesiones de Claude Code abiertas.
