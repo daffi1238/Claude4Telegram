@@ -57,6 +57,7 @@ Debajo del resumen hay un botón **🧠 Resumen IA**: manda un extracto de la co
 | `/aqui` | Vuelves al ordenador: lo pendiente pasa al terminal |
 | `/estado` | Sesiones activas y qué espera cada una |
 | `/resumen` | Qué está haciendo cada sesión (en un tema: detalle del proyecto; en General: una línea por sesión) |
+| `/chat` | Conversa con el modelo local del hub (responde a su respuesta para seguir) |
 | `/id` | Ids de chat, usuario y tema |
 
 ## Enviar archivos desde los proyectos
@@ -106,23 +107,35 @@ python3 ~/Claude4Telegram/hooks/c4t_key.py --lista | --borrar
 - Los `.zip` sin cifrar se dejan tal cual, sin extraer.
 - Ojo: el archivo descifrado queda en el disco del proyecto, al alcance de Claude.
 
-## Instrucciones por voz
+## Voz, OCR y chat (hub de modelos local)
 
-Manda una **nota de voz** (o un *video note*) al tema de un proyecto y se convierte en una instrucción para esa sesión, todo en local:
+Si configuras un **hub de modelos** en `localhost` (chat, STT, TTS y OCR bajo una API tipo OpenAI, con `C4T_HUB_URL`), se activan tres cosas. Todo el procesado es local; solo el audio y las imágenes pasan por Telegram.
 
-1. **Whisper** la transcribe en el equipo (modelo `C4T_WHISPER_MODEL`, por defecto `small`).
-2. Un **LLM local** opcional (`C4T_LLM_URL`, compatible con la API de OpenAI) repara el dictado: puntuación, mayúsculas y erratas de reconocimiento. Si no lo configuras, se usa la transcripción tal cual.
-3. El texto se **escribe en la sesión por tmux** (`send-keys`), precedido de un aviso de que viene de una nota de voz. Si no hay tmux, entra por el mismo camino que los archivos (lo recibe al terminar o cuando le escribas).
-4. Si hay una voz de **Piper** configurada, la respuesta de Claude al terminar se te devuelve como **nota de voz** en el mismo tema.
+### Instrucciones por voz
+
+Manda una **nota de voz** (o *video note*) al tema de un proyecto y se convierte en una instrucción para esa sesión:
 
 ```
-nota de voz ─▶ Whisper (local) ─▶ LLM local (repara) ─▶ tmux send-keys ─▶ sesión de Claude
-respuesta de Claude ─▶ Piper (local) ─▶ ffmpeg (opus) ─▶ nota de voz en el tema
+nota de voz ─▶ hub STT ─▶ hub chat (repara el dictado) ─▶ tmux send-keys ─▶ sesión de Claude
+respuesta de Claude ─▶ hub TTS ─▶ ffmpeg (opus) ─▶ nota de voz de vuelta al tema
 ```
 
-- Ni el audio, ni el texto, ni nada salen del equipo salvo por el propio Telegram.
-- La nota de voz original no se conserva: se borra tras transcribirla.
-- Requisitos: [`whisper`](https://github.com/openai/whisper) (`pip install -U openai-whisper`) para transcribir; `piper-tts` y `ffmpeg` para la respuesta hablada (`setup.sh` instala Piper y descarga una voz española). Sin `whisper`, una nota de voz se trata como un archivo normal.
+1. El hub la **transcribe** (STT).
+2. El hub **repara** el dictado (puntuación, mayúsculas, erratas), respetando términos técnicos.
+3. El texto se **escribe en la sesión por tmux**, con un aviso de que viene de una nota de voz. Sin tmux, entra como los archivos (al terminar o cuando le escribas).
+4. Cuando Claude termina, su respuesta vuelve como **nota de voz** al tema.
+
+La nota de voz original no se conserva: se borra tras transcribirla.
+
+### OCR de imágenes
+
+Manda una **imagen** al tema y, además de guardarla, el hub le pasa el **OCR**: el texto extraído se adjunta a la instrucción para Claude y se te muestra un extracto en Telegram.
+
+### Conversar con el modelo
+
+`/chat <mensaje>` habla con el modelo del hub desde cualquier tema; **responde** a su respuesta para seguir la conversación (mantiene algo de contexto). El texto suelto sin nada pendiente sigue devolviendo el resumen de estado.
+
+> El hub atiende **de uno en uno** y cambiar de tipo de modelo (chat→voz→OCR) cuesta unos segundos; el broker serializa las llamadas y usa timeouts holgados. Necesitas `ffmpeg` para la respuesta hablada. Sin hub configurado, estas tres funciones quedan desactivadas y las notas de voz se tratan como archivos normales.
 
 ## Cómo se entera cada sesión
 
@@ -138,7 +151,7 @@ Claude Code solo habla con el broker a través de los hooks, así que el broker 
 
 - tmux (opcional, recomendado: permite responder desde el terminal o Telegram, lo que llegue antes; también es lo que permite inyectar instrucciones de voz en vivo)
 - `gpg` y `7z` (p7zip) para descifrar archivos (opcional)
-- `whisper` (opcional, para instrucciones por voz) y un LLM local compatible con la API de OpenAI para repararlas; `piper-tts` + `ffmpeg` para la respuesta hablada
+- Un hub de modelos local tipo OpenAI (opcional, para voz/OCR/chat) y `ffmpeg` para la respuesta hablada
 - Linux con systemd (para el servicio; el broker en sí funciona en cualquier sistema con Python)
 - Python 3.10+
 - Claude Code 2.1 o superior (hooks `PermissionRequest` y `Stop` con `last_assistant_message`)
@@ -205,9 +218,10 @@ Hace una copia de seguridad de `~/.claude/settings.json` y solo añade sus propi
 | `C4T_STATE_DIR` | Estado persistente (por defecto `~/.local/state/claude4telegram`) |
 | `C4T_SUMMARY_MODEL` | Modelo del 🧠 Resumen IA en proyectos Claude (por defecto `haiku`; vacío = el configurado) |
 | `C4T_CLAUDE_BIN` | Ruta al comando `claude` si el servicio no lo encuentra (busca en el PATH y en `~/.local/bin`) |
-| `C4T_WHISPER_MODEL` | Modelo de Whisper para transcribir notas de voz (por defecto `small`) |
-| `C4T_LLM_URL` / `C4T_LLM_KEY` / `C4T_LLM_MODEL` | LLM local (API tipo OpenAI) que repara la transcripción; vacío = sin reparar |
-| `C4T_VOICE_MODEL` | Ruta al `.onnx` de Piper para la respuesta hablada (vacío = la que descarga `setup.sh`, si existe) |
+| `C4T_HUB_URL` | Hub de modelos local (chat/STT/TTS/OCR), p. ej. `http://localhost:8081`; vacío = voz/OCR/chat desactivados |
+| `C4T_HUB_KEY` | Bearer del hub (nunca se sube al repo) |
+| `C4T_CHAT_MODEL` | Modelo para `/chat` y para reparar transcripciones (por defecto `qwen-coder`) |
+| `C4T_TTS_VOICE` | Voz del hub para la respuesta hablada (por defecto `ef_dora`) |
 
 ## Varios equipos
 

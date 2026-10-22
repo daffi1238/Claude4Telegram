@@ -31,6 +31,7 @@ from .inbox import process as process_incoming
 from .media import MAX_UPLOAD, send_media
 from .presence import typed_since
 from .state import State
+from .hub import Hub, HISTORY_MESSAGES
 from . import voice
 from .summary import ago, md_bold, render_line, render_summary, transcript_of
 from .ai_summary import summarize
@@ -43,6 +44,14 @@ QUIET_NOTIFICATIONS = {"permission_prompt", "idle_prompt"}   # ya cubiertos por 
 TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024                    # getFile de la Bot API
 TERMINAL_POLL = 1.0                                          # s entre comprobaciones de tmux
 WAIT_MARGIN = 15                                             # s antes de que Claude Code mate el hook
+REPAIR_SYSTEM = (
+    "Eres un corrector de dictado por voz en español. Recibes la transcripción automática de una nota "
+    "de voz que un desarrollador le dicta a Claude Code. Devuelve SOLO el texto corregido: arregla "
+    "puntuación, mayúsculas y errores evidentes de reconocimiento, respeta términos técnicos y nombres "
+    "de ficheros, y no añadas comillas, explicaciones ni saludos. Si no entiendes algo, déjalo como está.")
+CHAT_SYSTEM = (
+    "Eres un asistente útil y conciso que responde por Telegram al dueño de este equipo. Responde en "
+    "español salvo que te escriban en otro idioma, ve al grano y usa texto plano (sin markdown pesado).")
 
 HELP = (
     "<b>claude4Telegram</b>\n"
@@ -51,6 +60,7 @@ HELP = (
     "/estado — sesiones activas y peticiones pendientes\n"
     "/resumen — qué está haciendo cada sesión (o escribe cualquier cosa en el tema); "
     "con 🧠 Resumen IA, un modelo te lo resume\n"
+    "/chat — conversa con el modelo local (responde a su respuesta para seguir)\n"
     "/id — ids de chat, usuario y tema\n\n"
     "Para texto libre, <b>responde</b> al mensaje del bot (o escribe en el tema si solo hay una pregunta pendiente)."
 )
@@ -87,6 +97,9 @@ class Broker:
         self.danger = [re.compile(p, re.IGNORECASE) for p in cfg.danger_patterns]
         self.ai_running: set[str] = set()   # sesiones con un 🧠 Resumen IA en marcha
         self.voice_reply: dict[str, int] = {}  # session_id -> thread_id al que narrar la próxima respuesta
+        self.hub = Hub(cfg.hub_url, cfg.hub_key, cfg.chat_model, cfg.tts_voice)
+        self.chat_history: dict[int, list[dict]] = {}  # thread_id -> conversación con el hub (/chat)
+        self.chat_msgs: dict[int, int] = {}            # message_id de una respuesta de /chat -> thread_id
 
     # ------------------------------------------------------------------ Telegram helpers
 
@@ -451,19 +464,36 @@ class Broker:
         async def on_file(m: Message):
             if not self.allowed(m.chat.id, m.from_user.id):
                 return
-            if (m.voice or m.video_note) and voice.whisper_bin():
+            if (m.voice or m.video_note) and self.hub.enabled:
                 await self.receive_voice(m)   # nota de voz → instrucción
             else:
-                await self.receive_file(m)    # cualquier otro archivo
+                await self.receive_file(m)    # cualquier otro archivo (con OCR si es imagen)
 
         @r.message(Command("resumen", "summary"))
         async def cmd_summary(m: Message):
             if self.allowed(m.chat.id, m.from_user.id):
                 await self.reply_summary(m)
 
+        @r.message(Command("chat"))
+        async def cmd_chat(m: Message):
+            if not self.allowed(m.chat.id, m.from_user.id):
+                return
+            if not self.hub.enabled:
+                await m.reply("El hub de modelos no está configurado (pon <code>C4T_HUB_URL</code> en el .env).")
+                return
+            prompt = (m.text or "").partition(" ")[2].strip()
+            if not prompt:
+                await m.reply("Uso: <code>/chat tu mensaje</code>. Luego <b>responde</b> a mi respuesta para seguir.")
+                return
+            await self.do_chat(m, prompt)
+
         @r.message(F.text & ~F.text.startswith("/"))
         async def on_text(m: Message):
             if not self.allowed(m.chat.id, m.from_user.id):
+                return
+            # Responder a una respuesta de /chat continúa esa conversación con el hub.
+            if m.reply_to_message and m.reply_to_message.message_id in self.chat_msgs:
+                await self.do_chat(m, m.text)
                 return
             req = None
             if m.reply_to_message and m.reply_to_message.message_id in self.msg_to_req:
@@ -578,6 +608,14 @@ class Broker:
                           f"En el ordenador: <code>{esc(key_cmd)}</code> y reenvíalo.")
             return
         notice = describe_for_claude(item, m.caption)
+        ocr_text = ""
+        if self.hub.enabled and voice.is_image(m) and item.path.is_file():
+            try:
+                ocr_text = await self.hub.ocr(item.path.read_bytes(), item.path.name)
+            except Exception as e:
+                log.warning("OCR en %s: %s", project, e)
+            if ocr_text:
+                notice += f"\n\nTexto extraído de la imagen por OCR (puede tener erratas):\n{ocr_text}"
         stop = self.pending_stop(m)
         if stop:
             await self.resolve(stop, {"text": notice}, "📥 Archivo enviado a Claude")
@@ -586,7 +624,8 @@ class Broker:
             self.state.inbox.setdefault(project, []).append(notice)
             self.state.save()
             where = "Claude lo recibirá en cuanto termine lo que está haciendo o le escribas."
-        await m.reply(f"📥 <code>{rel}</code> ({size // 1024 or 1} KB){icon}\n{where}")
+        extra = f"\n📝 <b>OCR:</b> {esc(clip(ocr_text, 500))}" if ocr_text else ""
+        await m.reply(f"📥 <code>{rel}</code> ({size // 1024 or 1} KB){icon}\n{where}{extra}")
 
     # ------------------------------------------------------------------ notas de voz
 
@@ -599,8 +638,24 @@ class Broker:
         stops = [p for p in self.pending.values() if p.kind == "stop" and p.thread_id == m.message_thread_id]
         return stops[0] if len(stops) == 1 else None
 
+    async def download_bytes(self, media) -> bytes:
+        buf = await self.bot.download(media)   # destino None → BytesIO en memoria
+        return buf.read()
+
+    async def repair(self, text: str) -> str:
+        """Repara la transcripción con el chat del hub. Ante cualquier fallo devuelve el texto original."""
+        if not self.hub.enabled:
+            return text
+        try:
+            fixed = await self.hub.chat(
+                [{"role": "system", "content": REPAIR_SYSTEM}, {"role": "user", "content": text}], max_tokens=400)
+            return fixed.strip('"').strip() or text
+        except Exception as e:
+            log.warning("reparar transcripción: %s", e)
+            return text
+
     async def receive_voice(self, m: Message) -> None:
-        """Nota de voz → transcripción (Whisper) → reparada (LLM local) → instrucción en la sesión."""
+        """Nota de voz → transcripción (hub STT) → reparada (hub chat) → instrucción en la sesión."""
         project = self.project_of_thread(m.message_thread_id)
         if project is None:
             if m.message_thread_id is None:
@@ -615,17 +670,16 @@ class Broker:
             await m.reply("La nota de voz supera los 20 MB que un bot puede descargar.")
             return
         note = await m.reply("🎧 Transcribiendo…")
-        tmp = inbox_dir(sess["root"]) / f"voz-{int(time.time())}.ogg"
         try:
-            await self.bot.download(media, destination=tmp)
-            text = await voice.transcribe(tmp, self.cfg.whisper_model)
-            instruction = await voice.repair(text, self.cfg.llm_url, self.cfg.llm_key, self.cfg.llm_model)
+            audio = await self.download_bytes(media)
+            text = await self.hub.transcribe(audio, "nota.ogg")
+            if not text:
+                raise RuntimeError("no se entendió nada en el audio")
+            instruction = await self.repair(text)
         except Exception as e:
             log.warning("voz en %s: %s", project, e)
             await self.edit_or_reply(note, m, f"⚠️ No pude procesar la nota de voz: {esc(clip(str(e), 300))}")
             return
-        finally:
-            tmp.unlink(missing_ok=True)
         for_claude = ("Instrucción dictada por voz desde Telegram (transcrita automáticamente, "
                       f"puede tener erratas):\n{instruction}")
         stop = self.pending_stop(m)
@@ -638,21 +692,37 @@ class Broker:
             self.state.inbox.setdefault(project, []).append(for_claude)
             self.state.save()
             where = "➡️ Claude la recibirá cuando termine lo que hace o le escribas (sin tmux no puedo teclear en vivo)."
-        if self.cfg.voice_model:
-            self.voice_reply[sess["id"]] = m.message_thread_id
+        self.voice_reply[sess["id"]] = m.message_thread_id
         await self.edit_or_reply(note, m, f"🎙 <b>Entendí:</b> {esc(clip(instruction, 1500))}\n{where}")
 
     @staticmethod
-    async def edit_or_reply(note: Message, m: Message, text: str) -> None:
+    async def edit_or_reply(note: Message, m: Message, text: str) -> Message:
         try:
-            await note.edit_text(text)
+            return await note.edit_text(text)
         except TelegramBadRequest:
-            await m.reply(text)
+            return await m.reply(text)
+
+    async def do_chat(self, m: Message, prompt: str) -> None:
+        """Conversación con el hub en este tema. Responder a la respuesta la continúa."""
+        thread = m.message_thread_id or 0
+        history = self.chat_history.setdefault(thread, [])
+        history.append({"role": "user", "content": clip(prompt, 4000)})
+        note = await m.reply("💬 …")
+        try:
+            answer = await self.hub.chat([{"role": "system", "content": CHAT_SYSTEM}] + history[-HISTORY_MESSAGES:])
+        except Exception as e:
+            history.pop()
+            await self.edit_or_reply(note, m, f"⚠️ El hub no respondió: {esc(clip(str(e), 300))}")
+            return
+        history.append({"role": "assistant", "content": answer})
+        self.chat_history[thread] = history[-HISTORY_MESSAGES * 2:]   # acota el contexto que guardamos
+        sent = await self.edit_or_reply(note, m, f"💬 {md_bold(esc(clip(answer, 3500)))}")
+        self.chat_msgs[sent.message_id] = thread   # para continuar al responder a este mensaje
 
     async def narrate_reply(self, sess: dict, thread_id: int, message: str) -> None:
-        """Convierte la respuesta de Claude en una nota de voz y la manda al tema."""
+        """Convierte la respuesta de Claude en una nota de voz (hub TTS) y la manda al tema."""
         try:
-            audio = await voice.synthesize(message, self.cfg.voice_model)
+            audio = await voice.to_opus(await self.hub.speak(message))
             if audio:
                 await send_media(self.bot, self.cfg.chat_id, thread_id, "respuesta.ogg", audio,
                                  f"🔊 <b>{esc(sess['project'])}</b>", "voice")
@@ -761,6 +831,7 @@ async def run(cfg: Config) -> None:
             BotCommand(command="aqui", description="Volver al ordenador"),
             BotCommand(command="estado", description="Sesiones y pendientes"),
             BotCommand(command="resumen", description="Qué está haciendo cada sesión"),
+            BotCommand(command="chat", description="Conversar con el modelo local"),
             BotCommand(command="id", description="Mostrar ids"),
         ])
 

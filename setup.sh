@@ -8,18 +8,9 @@ echo "→ Entorno virtual y dependencias"
 python3 -m venv .venv
 .venv/bin/pip install -q -r requirements.txt
 
-# Voz (opcional): descarga la voz española de Piper para las respuestas habladas.
-# Whisper (transcripción) y el LLM local se configuran aparte; ver README.
-VOICES="$HOME/.local/share/c4t-voices"
-VOICE="$VOICES/es_ES-davefx-medium.onnx"
-if [ ! -f "$VOICE" ]; then
-    echo "→ Descargando voz española de Piper (una vez, ~63 MB; Ctrl+C para omitir)"
-    mkdir -p "$VOICES"
-    base="https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_ES/davefx/medium"
-    curl -fsSL -o "$VOICE" "$base/es_ES-davefx-medium.onnx" \
-      && curl -fsSL -o "$VOICE.json" "$base/es_ES-davefx-medium.onnx.json" \
-      || echo "  (no se pudo descargar la voz; la transcripción funciona igual, solo faltará la respuesta hablada)"
-fi
+# Voz, OCR y chat se delegan en el hub de modelos local (C4T_HUB_URL); aquí solo hace falta
+# ffmpeg para convertir la voz del hub a nota de voz de Telegram. Ver README.
+command -v ffmpeg >/dev/null || echo "→ Aviso: instala 'ffmpeg' para las respuestas habladas (apt install ffmpeg)"
 
 if [ ! -f .env ]; then
     echo "→ Creando .env con un C4T_SECRET aleatorio"
