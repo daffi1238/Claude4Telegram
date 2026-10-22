@@ -31,6 +31,7 @@ from .inbox import process as process_incoming
 from .media import MAX_UPLOAD, send_media
 from .presence import typed_since
 from .state import State
+from . import voice
 from .summary import ago, md_bold, render_line, render_summary, transcript_of
 from .ai_summary import summarize
 
@@ -85,6 +86,7 @@ class Broker:
         self.topic_lock = asyncio.Lock()
         self.danger = [re.compile(p, re.IGNORECASE) for p in cfg.danger_patterns]
         self.ai_running: set[str] = set()   # sesiones con un 🧠 Resumen IA en marcha
+        self.voice_reply: dict[str, int] = {}  # session_id -> thread_id al que narrar la próxima respuesta
 
     # ------------------------------------------------------------------ Telegram helpers
 
@@ -280,6 +282,12 @@ class Broker:
                 return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                                "additionalContext": "\n\n".join(parts)}}
             return None
+        if event == "Stop" and sess["id"] in self.voice_reply:
+            # La tarea venía de una nota de voz: su respuesta se narra de vuelta al tema.
+            thread = self.voice_reply.pop(sess["id"])
+            msg = payload.get("last_assistant_message") or last_assistant_text(payload.get("transcript_path"))
+            if msg:
+                asyncio.create_task(self.narrate_reply(sess, thread, msg))
         if event == "Stop" and self.state.inbox.get(sess["project"]):
             notices = "\n\n".join(self.state.inbox.pop(sess["project"]))
             self.state.save()
@@ -441,8 +449,12 @@ class Broker:
 
         @r.message(F.document | F.photo | F.voice | F.audio | F.video | F.video_note | F.animation)
         async def on_file(m: Message):
-            if self.allowed(m.chat.id, m.from_user.id):
-                await self.receive_file(m)
+            if not self.allowed(m.chat.id, m.from_user.id):
+                return
+            if (m.voice or m.video_note) and voice.whisper_bin():
+                await self.receive_voice(m)   # nota de voz → instrucción
+            else:
+                await self.receive_file(m)    # cualquier otro archivo
 
         @r.message(Command("resumen", "summary"))
         async def cmd_summary(m: Message):
@@ -518,18 +530,27 @@ class Broker:
 
     # ------------------------------------------------------------------ archivos desde Telegram
 
-    async def receive_file(self, m: Message) -> None:
-        project = next((p for p, t in self.state.topics.items() if t == m.message_thread_id), None)
-        if project is None:
-            if m.message_thread_id is None:
-                await m.reply("Envía el archivo en el tema del proyecto al que va dirigido.")
-            return  # tema de otro equipo
-        sess = max((s for s in self.state.sessions.values() if s["project"] == project and (s.get("root") or s.get("cwd"))),
+    def project_of_thread(self, thread_id: int | None) -> str | None:
+        return next((p for p, t in self.state.topics.items() if t == thread_id), None)
+
+    def best_session(self, project: str) -> dict | None:
+        """Sesión más reciente del proyecto con carpeta conocida (dedúcela del cwd si hace falta)."""
+        sess = max((s for s in self.state.sessions.values()
+                    if s["project"] == project and (s.get("root") or s.get("cwd"))),
                    key=lambda s: s.get("last_seen", 0), default=None)
         if sess is not None and not sess.get("root"):
             # Sesión registrada antes de que el hook mandara la raíz: se deduce de su cwd.
             root = git_root(sess["cwd"])
             sess["root"] = str(root if root.name == project else Path(sess["cwd"]))
+        return sess
+
+    async def receive_file(self, m: Message) -> None:
+        project = self.project_of_thread(m.message_thread_id)
+        if project is None:
+            if m.message_thread_id is None:
+                await m.reply("Envía el archivo en el tema del proyecto al que va dirigido.")
+            return  # tema de otro equipo
+        sess = self.best_session(project)
         if sess is None or not Path(sess["root"]).is_dir():
             await m.reply("Aún no sé en qué carpeta está este proyecto: abre una sesión de Claude Code en él.")
             return
@@ -557,12 +578,7 @@ class Broker:
                           f"En el ordenador: <code>{esc(key_cmd)}</code> y reenvíalo.")
             return
         notice = describe_for_claude(item, m.caption)
-        stop = None
-        if m.reply_to_message and m.reply_to_message.message_id in self.msg_to_req:
-            stop = self.pending.get(self.msg_to_req[m.reply_to_message.message_id])
-        if stop is None or stop.kind != "stop":
-            stops = [p for p in self.pending.values() if p.kind == "stop" and p.thread_id == m.message_thread_id]
-            stop = stops[0] if len(stops) == 1 else None
+        stop = self.pending_stop(m)
         if stop:
             await self.resolve(stop, {"text": notice}, "📥 Archivo enviado a Claude")
             where = "Claude ya lo tiene y sigue trabajando."
@@ -571,6 +587,77 @@ class Broker:
             self.state.save()
             where = "Claude lo recibirá en cuanto termine lo que está haciendo o le escribas."
         await m.reply(f"📥 <code>{rel}</code> ({size // 1024 or 1} KB){icon}\n{where}")
+
+    # ------------------------------------------------------------------ notas de voz
+
+    def pending_stop(self, m: Message) -> "Pending | None":
+        """La petición de fin de tarea a la que responde este mensaje (si contesta a una, o si es la única)."""
+        if m.reply_to_message and m.reply_to_message.message_id in self.msg_to_req:
+            req = self.pending.get(self.msg_to_req[m.reply_to_message.message_id])
+            if req and req.kind == "stop":
+                return req
+        stops = [p for p in self.pending.values() if p.kind == "stop" and p.thread_id == m.message_thread_id]
+        return stops[0] if len(stops) == 1 else None
+
+    async def receive_voice(self, m: Message) -> None:
+        """Nota de voz → transcripción (Whisper) → reparada (LLM local) → instrucción en la sesión."""
+        project = self.project_of_thread(m.message_thread_id)
+        if project is None:
+            if m.message_thread_id is None:
+                await m.reply("Envía la nota de voz en el tema del proyecto.")
+            return
+        sess = self.best_session(project)
+        if sess is None:
+            await m.reply("Aún no sé en qué carpeta está este proyecto: abre una sesión de Claude Code en él.")
+            return
+        media = m.voice or m.video_note
+        if (media.file_size or 0) > TELEGRAM_DOWNLOAD_LIMIT:
+            await m.reply("La nota de voz supera los 20 MB que un bot puede descargar.")
+            return
+        note = await m.reply("🎧 Transcribiendo…")
+        tmp = inbox_dir(sess["root"]) / f"voz-{int(time.time())}.ogg"
+        try:
+            await self.bot.download(media, destination=tmp)
+            text = await voice.transcribe(tmp, self.cfg.whisper_model)
+            instruction = await voice.repair(text, self.cfg.llm_url, self.cfg.llm_key, self.cfg.llm_model)
+        except Exception as e:
+            log.warning("voz en %s: %s", project, e)
+            await self.edit_or_reply(note, m, f"⚠️ No pude procesar la nota de voz: {esc(clip(str(e), 300))}")
+            return
+        finally:
+            tmp.unlink(missing_ok=True)
+        for_claude = ("Instrucción dictada por voz desde Telegram (transcrita automáticamente, "
+                      f"puede tener erratas):\n{instruction}")
+        stop = self.pending_stop(m)
+        if stop:
+            await self.resolve(stop, {"text": for_claude}, "🎙 Instrucción de voz enviada")
+            where = "➡️ Enviada; Claude retoma la tarea."
+        elif await voice.inject(sess.get("tmux"), for_claude):
+            where = "➡️ Escrita en la sesión."
+        else:
+            self.state.inbox.setdefault(project, []).append(for_claude)
+            self.state.save()
+            where = "➡️ Claude la recibirá cuando termine lo que hace o le escribas (sin tmux no puedo teclear en vivo)."
+        if self.cfg.voice_model:
+            self.voice_reply[sess["id"]] = m.message_thread_id
+        await self.edit_or_reply(note, m, f"🎙 <b>Entendí:</b> {esc(clip(instruction, 1500))}\n{where}")
+
+    @staticmethod
+    async def edit_or_reply(note: Message, m: Message, text: str) -> None:
+        try:
+            await note.edit_text(text)
+        except TelegramBadRequest:
+            await m.reply(text)
+
+    async def narrate_reply(self, sess: dict, thread_id: int, message: str) -> None:
+        """Convierte la respuesta de Claude en una nota de voz y la manda al tema."""
+        try:
+            audio = await voice.synthesize(message, self.cfg.voice_model)
+            if audio:
+                await send_media(self.bot, self.cfg.chat_id, thread_id, "respuesta.ogg", audio,
+                                 f"🔊 <b>{esc(sess['project'])}</b>", "voice")
+        except Exception as e:
+            log.warning("TTS en %s: %s", sess["project"], e)
 
     # ------------------------------------------------------------------ resúmenes
 
