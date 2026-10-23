@@ -721,8 +721,11 @@ class Broker:
 
     async def narrate_reply(self, sess: dict, thread_id: int, message: str) -> None:
         """Convierte la respuesta de Claude en una nota de voz (hub TTS) y la manda al tema."""
+        spoken = voice.speakable(message)
+        if not spoken:
+            return
         try:
-            audio = await voice.to_opus(await self.hub.speak(message))
+            audio = await voice.to_opus(await self.hub.speak(spoken))
             if audio:
                 await send_media(self.bot, self.cfg.chat_id, thread_id, "respuesta.ogg", audio,
                                  f"🔊 <b>{esc(sess['project'])}</b>", "voice")

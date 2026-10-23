@@ -1,9 +1,37 @@
-"""Pegamento de voz para el broker: escribir en la sesión por tmux y convertir el WAV del hub
-a ogg/opus para mandarlo como nota de voz. La transcripción y la síntesis las hace el hub (hub.py)."""
+"""Pegamento de voz para el broker: escribir en la sesión por tmux, limpiar el texto para que
+se lea bien en voz alta, y convertir el WAV del hub a ogg/opus para mandarlo como nota de voz.
+La transcripción y la síntesis las hace el hub (hub.py)."""
 import asyncio
+import re
 import shutil
 import tempfile
 from pathlib import Path
+
+SPEAK_MAX = 1500   # caracteres máximos que se mandan a TTS (una respuesta larga aburre en audio)
+
+# Emojis y pictogramas: se quitan para que el TTS no los deletree.
+_EMOJI = re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF"
+    "\U00002190-\U000021FF\U00002B00-\U00002BFF\U00002300-\U000023FF️‍⃣]+")
+
+
+def speakable(text: str) -> str:
+    """Convierte la respuesta de Claude (markdown + emojis) en texto plano apto para leer en voz alta."""
+    text = re.sub(r"```.*?```", " (bloque de código) ", text, flags=re.DOTALL)   # bloques de código
+    text = re.sub(r"~~~.*?~~~", " (bloque de código) ", text, flags=re.DOTALL)
+    text = re.sub(r"`([^`]+)`", r"\1", text)                                      # `código` en línea
+    text = re.sub(r"!?\[([^\]]+)\]\([^)]+\)", r"\1", text)                        # enlaces/imágenes → texto
+    text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.MULTILINE)             # encabezados
+    text = re.sub(r"(\*\*|__)(.+?)\1", r"\2", text)                              # **negrita** / __negrita__
+    text = re.sub(r"(?<!\w)[*_]([^*_\n]+)[*_](?!\w)", r"\1", text)               # *cursiva* / _cursiva_
+    text = re.sub(r"^\s{0,3}>\s?", "", text, flags=re.MULTILINE)                  # citas
+    text = re.sub(r"^\s*[-*•+]\s+", "", text, flags=re.MULTILINE)                 # viñetas
+    text = re.sub(r"^\s*\d+[.)]\s+", "", text, flags=re.MULTILINE)                # listas numeradas
+    text = re.sub(r"^\s*([-*_]\s?){3,}\s*$", "", text, flags=re.MULTILINE)        # líneas ---
+    text = _EMOJI.sub("", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{2,}", "\n", text).strip()
+    return text[:SPEAK_MAX].strip()
 
 
 async def _run(cmd: list[str], timeout: float, stdin: bytes | None = None) -> tuple[int, bytes]:
