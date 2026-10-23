@@ -57,6 +57,7 @@ VOICE_SUMMARY_SYSTEM = (
     "texto plano (sin markdown, sin emojis, sin bloques de código), máximo 1500 caracteres. Ve al grano: qué "
     "se ha hecho y qué falta o qué debe decidir el usuario. Sin saludos ni despedidas.")
 VOICE_SUMMARY_INPUT = 6000   # caracteres de la respuesta que se mandan a resumir (contexto acotado del hub)
+CHAT_MSGS_CAP = 200          # respuestas de /chat recordadas para continuar al responderlas
 
 HELP = (
     "<b>claude4Telegram</b>\n"
@@ -723,6 +724,9 @@ class Broker:
         self.chat_history[thread] = history[-HISTORY_MESSAGES * 2:]   # acota el contexto que guardamos
         sent = await self.edit_or_reply(note, m, f"💬 {md_bold(esc(clip(answer, 3500)))}")
         self.chat_msgs[sent.message_id] = thread   # para continuar al responder a este mensaje
+        if len(self.chat_msgs) > CHAT_MSGS_CAP:     # no crece sin límite; responder a uno viejo da resumen
+            for mid in list(self.chat_msgs)[:-CHAT_MSGS_CAP]:
+                del self.chat_msgs[mid]
 
     async def compact_reply(self, message: str) -> str:
         """Resumen de la respuesta de Claude a ≤1500 car. para texto + audio; si falla, el texto a secas."""
