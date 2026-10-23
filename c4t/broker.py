@@ -52,6 +52,11 @@ REPAIR_SYSTEM = (
 CHAT_SYSTEM = (
     "Eres un asistente útil y conciso que responde por Telegram al dueño de este equipo. Responde en "
     "español salvo que te escriban en otro idioma, ve al grano y usa texto plano (sin markdown pesado).")
+VOICE_SUMMARY_SYSTEM = (
+    "Resume la siguiente respuesta de Claude Code para leerla en voz alta y verla en Telegram. En español, "
+    "texto plano (sin markdown, sin emojis, sin bloques de código), máximo 1500 caracteres. Ve al grano: qué "
+    "se ha hecho y qué falta o qué debe decidir el usuario. Sin saludos ni despedidas.")
+VOICE_SUMMARY_INPUT = 6000   # caracteres de la respuesta que se mandan a resumir (contexto acotado del hub)
 
 HELP = (
     "<b>claude4Telegram</b>\n"
@@ -719,18 +724,33 @@ class Broker:
         sent = await self.edit_or_reply(note, m, f"💬 {md_bold(esc(clip(answer, 3500)))}")
         self.chat_msgs[sent.message_id] = thread   # para continuar al responder a este mensaje
 
+    async def compact_reply(self, message: str) -> str:
+        """Resumen de la respuesta de Claude a ≤1500 car. para texto + audio; si falla, el texto a secas."""
+        if self.cfg.voice_summary and self.hub.enabled:
+            try:
+                summary = await self.hub.chat(
+                    [{"role": "system", "content": VOICE_SUMMARY_SYSTEM},
+                     {"role": "user", "content": message[:VOICE_SUMMARY_INPUT]}], max_tokens=512)
+                if summary:
+                    return voice.speakable(summary)   # por si el modelo cuela markdown/emojis igualmente
+            except Exception as e:
+                log.warning("resumen de voz: %s", e)
+        return voice.speakable(message)
+
     async def narrate_reply(self, sess: dict, thread_id: int, message: str) -> None:
-        """Convierte la respuesta de Claude en una nota de voz (hub TTS) y la manda al tema."""
-        spoken = voice.speakable(message)
-        if not spoken:
+        """Resume la respuesta de Claude y la manda al tema como nota de voz (hub TTS) + texto."""
+        text = await self.compact_reply(message)
+        if not text:
             return
+        caption = f"🔊 <b>{esc(sess['project'])}</b>\n{esc(text)}"
         try:
-            audio = await voice.to_opus(await self.hub.speak(spoken))
+            audio = await voice.to_opus(await self.hub.speak(text))
             if audio:
-                await send_media(self.bot, self.cfg.chat_id, thread_id, "respuesta.ogg", audio,
-                                 f"🔊 <b>{esc(sess['project'])}</b>", "voice")
+                await send_media(self.bot, self.cfg.chat_id, thread_id, "respuesta.ogg", audio, caption, "voice")
+                return
         except Exception as e:
             log.warning("TTS en %s: %s", sess["project"], e)
+        await self.send(sess["project"], sess["provider"], caption)   # sin audio, al menos el texto
 
     # ------------------------------------------------------------------ resúmenes
 

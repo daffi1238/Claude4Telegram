@@ -123,7 +123,7 @@ respuesta de Claude ─▶ hub TTS ─▶ ffmpeg (opus) ─▶ nota de voz de vu
 1. El hub la **transcribe** (STT).
 2. El hub **repara** el dictado (puntuación, mayúsculas, erratas), respetando términos técnicos.
 3. El texto se **escribe en la sesión por tmux**, con un aviso de que viene de una nota de voz. Sin tmux, entra como los archivos (al terminar o cuando le escribas).
-4. Cuando Claude termina, su respuesta vuelve como **nota de voz** al tema.
+4. Cuando Claude termina, el hub **resume** su respuesta a ≤1500 caracteres (texto plano, sin markdown ni emojis) y ese resumen vuelve al tema como **nota de voz + texto**. Desactívalo con `C4T_VOICE_SUMMARY=0` para que lea la respuesta íntegra.
 
 La nota de voz original no se conserva: se borra tras transcribirla.
 
@@ -222,6 +222,7 @@ Hace una copia de seguridad de `~/.claude/settings.json` y solo añade sus propi
 | `C4T_HUB_KEY` | Bearer del hub (nunca se sube al repo) |
 | `C4T_CHAT_MODEL` | Modelo para `/chat` y para reparar transcripciones (por defecto `qwen-coder`) |
 | `C4T_TTS_VOICE` | Voz del hub para la respuesta hablada (por defecto `ef_dora`) |
+| `C4T_VOICE_SUMMARY` | Resumir con el hub la respuesta hablada a ≤1500 car. (por defecto `1`; `0` para leerla entera) |
 
 ## Varios equipos
 

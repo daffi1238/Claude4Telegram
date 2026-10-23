@@ -53,6 +53,7 @@ class Config:
     hub_key: str = ""
     chat_model: str = "qwen-coder"  # modelo para /chat y para reparar transcripciones
     tts_voice: str = "ef_dora"      # voz del hub para la respuesta hablada
+    voice_summary: bool = True      # resumir con el hub la respuesta hablada (texto + audio compactos)
 
     @property
     def configured(self) -> bool:
@@ -87,4 +88,5 @@ def load_config() -> Config:
         hub_key=env.get("C4T_HUB_KEY", ""),
         chat_model=env.get("C4T_CHAT_MODEL", "qwen-coder"),
         tts_voice=env.get("C4T_TTS_VOICE", "ef_dora"),
+        voice_summary=env.get("C4T_VOICE_SUMMARY", "1") not in ("0", "false", "no", ""),
     )
