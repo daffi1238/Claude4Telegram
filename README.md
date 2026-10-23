@@ -266,9 +266,12 @@ rm ~/.config/systemd/user/claude4telegram.service
 c4t/            broker: bot de Telegram + servidor HTTP local
 hooks/          hook de Claude Code, c4t_send.py y c4t_key.py (solo librería estándar)
 systemd/        plantilla del servicio de usuario
+tests/          pruebas de la lógica pura (unittest, sin red)
 install_hooks.py  instala/desinstala los hooks en ~/.claude/settings.json
 setup.sh        instalación en un equipo nuevo
 ```
+
+Pruebas (no necesitan hub ni Telegram): `python3 -m unittest discover -s tests`
 
 ## Licencia
 
