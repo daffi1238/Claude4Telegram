@@ -18,6 +18,13 @@ if [ ! -f .env ]; then
     chmod 600 .env
     secret="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
     sed -i "s/^C4T_SECRET=$/C4T_SECRET=${secret}/" .env
+    # Si hay terminal interactiva, pregunta token y prefijo (útil con varios equipos en un mismo grupo).
+    if [ -t 0 ]; then
+        read -rp "Token del bot de @BotFather (Enter para ponerlo luego): " token || token=""
+        [ -n "${token:-}" ] && sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${token}|" .env
+        read -rp "Prefijo de los temas para este equipo, p. ej. 'portátil · ' (Enter para ninguno): " prefix || prefix=""
+        [ -n "${prefix:-}" ] && printf 'C4T_TOPIC_PREFIX=%s\n' "${prefix}" >> .env
+    fi
 else
     echo "→ .env ya existe, no se toca"
 fi

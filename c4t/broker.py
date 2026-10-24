@@ -115,8 +115,10 @@ class Broker:
     async def topic_for(self, project: str, provider: str) -> int:
         async with self.topic_lock:
             if project not in self.state.topics:
+                # El prefijo (varios equipos en un grupo) se une con un espacio: "portátil · web".
+                name = f"{self.cfg.topic_prefix} {project}" if self.cfg.topic_prefix else project
                 topic = await self.bot.create_forum_topic(
-                    self.cfg.chat_id, name=f"{self.cfg.topic_prefix}{project}"[:128],
+                    self.cfg.chat_id, name=name[:128],
                     icon_color=TOPIC_COLORS.get(provider, DEFAULT_TOPIC_COLOR))
                 self.state.topics[project] = topic.message_thread_id
                 self.state.save()

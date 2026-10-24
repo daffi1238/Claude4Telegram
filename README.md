@@ -229,7 +229,7 @@ Hace una copia de seguridad de `~/.claude/settings.json` y solo añade sus propi
 Telegram solo permite que **un proceso** lea las actualizaciones de cada bot, así que **cada equipo necesita su propio bot**. Pueden compartir el mismo grupo:
 
 1. Crea un bot nuevo en @BotFather para cada equipo y hazlo admin del grupo.
-2. En el `.env` de cada equipo pon su token, el mismo `TELEGRAM_CHAT_ID` y un `C4T_TOPIC_PREFIX` distinto (por ejemplo `portátil · ` y `servidor · `).
+2. En el `.env` de cada equipo pon su token, el mismo `TELEGRAM_CHAT_ID` y un `C4T_TOPIC_PREFIX` distinto (por ejemplo `portátil ·` y `servidor ·`; se une al nombre con un espacio, así el tema sale como `portátil · web`). `setup.sh` te pregunta el token y el prefijo al crear el `.env`.
 3. `/fuera` y `/aqui` sin mención afectan a todos los equipos. Usa `/fuera@bot_del_portatil` para uno solo.
 
 ## Proyectos con DeepSeek u otros proveedores
