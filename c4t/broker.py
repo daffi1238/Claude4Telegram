@@ -303,16 +303,18 @@ class Broker:
                 return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                                "additionalContext": "\n\n".join(parts)}}
             return None
+        if event == "Stop" and self.state.inbox.get(sess["project"]):
+            # Hay archivos/instrucciones en cola: se entregan y la sesión sigue; aún no es el final,
+            # así que no se narra todavía (la respuesta a narrar es la de la tarea que empieza ahora).
+            notices = "\n\n".join(self.state.inbox.pop(sess["project"]))
+            self.state.save()
+            return {"decision": "block", "reason": notices}
         if event == "Stop" and sess["id"] in self.voice_reply:
-            # La tarea venía de una nota de voz: su respuesta se narra de vuelta al tema.
+            # La tarea venía de una nota de voz y ya no queda nada en cola: se narra la respuesta.
             thread = self.voice_reply.pop(sess["id"])
             msg = payload.get("last_assistant_message") or last_assistant_text(payload.get("transcript_path"))
             if msg:
                 asyncio.create_task(self.narrate_reply(sess, thread, msg))
-        if event == "Stop" and self.state.inbox.get(sess["project"]):
-            notices = "\n\n".join(self.state.inbox.pop(sess["project"]))
-            self.state.save()
-            return {"decision": "block", "reason": notices}
         if not self.state.away:
             return None
         if event in ("PermissionRequest", "PreToolUse", "Stop") and \
