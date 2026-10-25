@@ -67,6 +67,7 @@ HELP = (
     "/resumen — qué está haciendo cada sesión (o escribe cualquier cosa en el tema); "
     "con 🧠 Resumen IA, un modelo te lo resume\n"
     "/chat — conversa con el modelo local (responde a su respuesta para seguir)\n"
+    "/di — manda la siguiente instrucción a la sesión del tema\n"
     "/id — ids de chat, usuario y tema\n\n"
     "Para texto libre, <b>responde</b> al mensaje del bot (o escribe en el tema si solo hay una pregunta pendiente)."
 )
@@ -497,6 +498,16 @@ class Broker:
                 return
             await self.do_chat(m, prompt)
 
+        @r.message(Command("di", "haz", "instr"))
+        async def cmd_say(m: Message):
+            if not self.allowed(m.chat.id, m.from_user.id):
+                return
+            text = (m.text or "").partition(" ")[2].strip()
+            if not text:
+                await m.reply("Uso: <code>/di haz lo siguiente…</code> — manda esa instrucción a la sesión del tema.")
+                return
+            await self.send_instruction(m, text)
+
         @r.message(F.text & ~F.text.startswith("/"))
         async def on_text(m: Message):
             if not self.allowed(m.chat.id, m.from_user.id):
@@ -664,6 +675,31 @@ class Broker:
             log.warning("reparar transcripción: %s", e)
             return text
 
+    async def deliver_instruction(self, m: Message, sess: dict, project: str, for_claude: str) -> str:
+        """Entrega una instrucción a la sesión: resuelve el 🏁 pendiente, la teclea por tmux, o la encola."""
+        stop = self.pending_stop(m)
+        if stop:
+            await self.resolve(stop, {"text": for_claude}, "📨 Instrucción enviada")
+            return "➡️ Enviada; Claude retoma la tarea."
+        if await voice.inject(sess.get("tmux"), for_claude):
+            return "➡️ Escrita en la sesión."
+        self.state.inbox.setdefault(project, []).append(for_claude)
+        self.state.save()
+        return "➡️ Claude la recibirá cuando termine lo que hace o le escribas (sin tmux no puedo teclear en vivo)."
+
+    async def send_instruction(self, m: Message, text: str) -> None:
+        """Comando /di: manda un texto como instrucción al proyecto del tema."""
+        project = self.project_of_thread(m.message_thread_id)
+        if project is None:
+            await m.reply("Usa /di dentro del tema del proyecto al que quieres mandar la instrucción.")
+            return
+        sess = self.best_session(project)
+        if sess is None:
+            await m.reply("Aún no sé en qué carpeta está este proyecto: abre una sesión de Claude Code en él.")
+            return
+        where = await self.deliver_instruction(m, sess, project, text)
+        await m.reply(f"📨 <b>Instrucción:</b> {esc(clip(text, 1500))}\n{where}")
+
     async def receive_voice(self, m: Message) -> None:
         """Nota de voz → transcripción (hub STT) → reparada (hub chat) → instrucción en la sesión."""
         project = self.project_of_thread(m.message_thread_id)
@@ -692,16 +728,7 @@ class Broker:
             return
         for_claude = ("Instrucción dictada por voz desde Telegram (transcrita automáticamente, "
                       f"puede tener erratas):\n{instruction}")
-        stop = self.pending_stop(m)
-        if stop:
-            await self.resolve(stop, {"text": for_claude}, "🎙 Instrucción de voz enviada")
-            where = "➡️ Enviada; Claude retoma la tarea."
-        elif await voice.inject(sess.get("tmux"), for_claude):
-            where = "➡️ Escrita en la sesión."
-        else:
-            self.state.inbox.setdefault(project, []).append(for_claude)
-            self.state.save()
-            where = "➡️ Claude la recibirá cuando termine lo que hace o le escribas (sin tmux no puedo teclear en vivo)."
+        where = await self.deliver_instruction(m, sess, project, for_claude)
         self.voice_reply[sess["id"]] = m.message_thread_id
         await self.edit_or_reply(note, m, f"🎙 <b>Entendí:</b> {esc(clip(instruction, 1500))}\n{where}")
 
@@ -863,6 +890,7 @@ async def run(cfg: Config) -> None:
             BotCommand(command="estado", description="Sesiones y pendientes"),
             BotCommand(command="resumen", description="Qué está haciendo cada sesión"),
             BotCommand(command="chat", description="Conversar con el modelo local"),
+            BotCommand(command="di", description="Mandar la siguiente instrucción a la sesión"),
             BotCommand(command="id", description="Mostrar ids"),
         ])
 

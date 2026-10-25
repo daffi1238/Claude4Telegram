@@ -44,6 +44,8 @@ Escribe cualquier cosa ("¿cómo vas?") en el tema de un proyecto cuando no haya
 
 Si hay varias sesiones activas en el proyecto, te deja elegir con un botón.
 
+**Pedir resumen y mandar lo siguiente.** El flujo típico desde el móvil: pides el resumen (`/resumen` o el botón 🧠 Resumen IA), y luego mandas la siguiente instrucción con **`/di haz lo siguiente…`**. `/di` la entrega a la sesión al instante: resuelve el 🏁 si Claude estaba esperando, la teclea por tmux si la sesión está abierta, o la deja en cola para el próximo arranque. También sirve responder al mensaje 🏁 "Claude ha terminado" o mandar una nota de voz.
+
 Debajo del resumen hay un botón **🧠 Resumen IA**: manda un extracto de la conversación (tus instrucciones, las respuestas de Claude y las herramientas usadas, unos 40 000 caracteres como máximo) a `claude -p` sin herramientas y te devuelve objetivo, hecho, estado, pendiente y siguiente paso. Este sí gasta tokens:
 
 - Se lanza en la carpeta del proyecto, así que usa su misma configuración: en un proyecto DeepSeek resume DeepSeek con el modelo del proyecto; en uno Claude, `haiku` (`C4T_SUMMARY_MODEL`).
@@ -58,6 +60,7 @@ Debajo del resumen hay un botón **🧠 Resumen IA**: manda un extracto de la co
 | `/estado` | Sesiones activas y qué espera cada una |
 | `/resumen` | Qué está haciendo cada sesión (en un tema: detalle del proyecto; en General: una línea por sesión) |
 | `/chat` | Conversa con el modelo local del hub (responde a su respuesta para seguir) |
+| `/di` | Manda la siguiente instrucción a la sesión del tema (`/di haz lo siguiente…`); alias `/haz` |
 | `/id` | Ids de chat, usuario y tema |
 
 ## Enviar archivos desde los proyectos
