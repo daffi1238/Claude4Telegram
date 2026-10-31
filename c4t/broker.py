@@ -58,6 +58,7 @@ VOICE_SUMMARY_SYSTEM = (
     "se ha hecho y qué falta o qué debe decidir el usuario. Sin saludos ni despedidas.")
 VOICE_SUMMARY_INPUT = 6000   # caracteres de la respuesta que se mandan a resumir (contexto acotado del hub)
 CHAT_MSGS_CAP = 200          # respuestas de /chat recordadas para continuar al responderlas
+OFFERED_CAP = 50             # textos sueltos ofrecidos como instrucción con un botón
 
 HELP = (
     "<b>claude4Telegram</b>\n"
@@ -107,6 +108,7 @@ class Broker:
         self.hub = Hub(cfg.hub_url, cfg.hub_key, cfg.chat_model, cfg.tts_voice)
         self.chat_history: dict[int, list[dict]] = {}  # thread_id -> conversación con el hub (/chat)
         self.chat_msgs: dict[int, int] = {}            # message_id de una respuesta de /chat -> thread_id
+        self.offered: dict[str, tuple[int, str]] = {}  # token -> (thread_id, texto) ofrecido como instrucción
 
     # ------------------------------------------------------------------ Telegram helpers
 
@@ -530,7 +532,7 @@ class Broker:
                 # Nada pendiente: el texto se toma como "¿cómo vas?". Con varios equipos en el
                 # mismo grupo, solo contesta el broker dueño del tema.
                 if m.message_thread_id in self.state.topics.values():
-                    await self.reply_summary(m)
+                    await self.reply_summary(m, offer=m.text)
                 return
             labels = {"perm": "❌ Denegado con comentario", "question": "💬 Respuesta", "stop": "▶️ Nueva instrucción"}
             await self.resolve(req, {"text": m.text}, f"{labels[req.kind]}: {m.text}")
@@ -542,6 +544,19 @@ class Broker:
                 await self.ack(cq, "No autorizado")
                 return
             req_id, _, action = (cq.data or "").partition(":")
+            if req_id == "ins":
+                offer = self.offered.pop(action, None)
+                if offer is None:
+                    await self.ack(cq, "Esa propuesta ya no está disponible")
+                    return
+                thread_id, text = offer
+                where = await self.deliver_text(thread_id, text)
+                if not where:
+                    await self.ack(cq, "No hay sesión en este proyecto")
+                    return
+                await self.ack(cq, "Enviada")
+                await cq.message.reply(f"📨 <b>Instrucción:</b> {esc(clip(text, 1500))}\n{where}")
+                return
             if req_id in ("sum", "ai"):
                 sess = next((s for s in self.state.sessions.values() if s["id"].startswith(action)), None)
                 if sess is None:
@@ -675,17 +690,28 @@ class Broker:
             log.warning("reparar transcripción: %s", e)
             return text
 
-    async def deliver_instruction(self, m: Message, sess: dict, project: str, for_claude: str) -> str:
-        """Entrega una instrucción a la sesión: resuelve el 🏁 pendiente, la teclea por tmux, o la encola."""
-        stop = self.pending_stop(m)
+    async def route_instruction(self, thread_id: int, project: str, sess: dict, text: str, stop) -> str:
+        """Entrega una instrucción: resuelve el 🏁 pendiente, la teclea por tmux, o la encola."""
         if stop:
-            await self.resolve(stop, {"text": for_claude}, "📨 Instrucción enviada")
+            await self.resolve(stop, {"text": text}, "📨 Instrucción enviada")
             return "➡️ Enviada; Claude retoma la tarea."
-        if await voice.inject(sess.get("tmux"), for_claude):
+        if await voice.inject(sess.get("tmux"), text):
             return "➡️ Escrita en la sesión."
-        self.state.inbox.setdefault(project, []).append(for_claude)
+        self.state.inbox.setdefault(project, []).append(text)
         self.state.save()
         return "➡️ Claude la recibirá cuando termine lo que hace o le escribas (sin tmux no puedo teclear en vivo)."
+
+    async def deliver_instruction(self, m: Message, sess: dict, project: str, for_claude: str) -> str:
+        return await self.route_instruction(m.message_thread_id, project, sess, for_claude, self.pending_stop(m))
+
+    async def deliver_text(self, thread_id: int, text: str) -> str:
+        """Entrega un texto al proyecto del tema (desde un botón, sin Message). '' si no hay sesión."""
+        project = self.project_of_thread(thread_id)
+        sess = self.best_session(project) if project else None
+        if sess is None:
+            return ""
+        stops = [p for p in self.pending.values() if p.kind == "stop" and p.thread_id == thread_id]
+        return await self.route_instruction(thread_id, project, sess, text, stops[0] if len(stops) == 1 else None)
 
     async def send_instruction(self, m: Message, text: str) -> None:
         """Comando /di: manda un texto como instrucción al proyecto del tema."""
@@ -799,9 +825,16 @@ class Broker:
         active = [s for s in pool if not s.get("ended") and time.time() - s.get("last_seen", 0) < 86400]
         return active or (pool[:1] if project else [])
 
-    async def reply_summary(self, m: Message) -> None:
+    async def reply_summary(self, m: Message, offer: str | None = None) -> None:
         project = next((p for p, t in self.state.topics.items() if t == m.message_thread_id), None)
         sessions = self.recent_sessions(project)
+        # Si escribiste texto suelto en el tema, se ofrece mandarlo como instrucción con un botón.
+        token = None
+        if offer and project and sessions:
+            token = secrets.token_hex(4)
+            self.offered[token] = (m.message_thread_id, offer)
+            for old in list(self.offered)[:-OFFERED_CAP]:
+                del self.offered[old]
         if not sessions:
             await m.reply("No hay sesiones registradas" + (" en este proyecto." if project else " en las últimas 24 h."))
         elif project is None:
@@ -809,16 +842,21 @@ class Broker:
                                     + [render_line(s, self.waiting_for(s["id"])) for s in sessions]))
         elif len(sessions) == 1:
             await m.reply(render_summary(sessions[0], self.waiting_for(sessions[0]["id"])),
-                          reply_markup=self.summary_markup(sessions[0]))
+                          reply_markup=self.summary_markup(sessions[0], token))
         else:
             rows = [[btn(f"{s['provider']} · {s['id'][:6]} · {ago(s.get('last_seen'))}", f"sum:{s['id'][:8]}")]
                     for s in sessions[:8]]
+            if token:
+                rows.append([btn("📨 Mandarlo como instrucción", f"ins:{token}")])
             await m.reply(f"Hay {len(sessions)} sesiones activas en <b>{esc(project)}</b>. ¿Cuál?",
                           reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
     @staticmethod
-    def summary_markup(sess: dict) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(inline_keyboard=[[btn("🧠 Resumen IA", f"ai:{sess['id'][:8]}")]])
+    def summary_markup(sess: dict, offer_token: str | None = None) -> InlineKeyboardMarkup:
+        rows = [[btn("🧠 Resumen IA", f"ai:{sess['id'][:8]}")]]
+        if offer_token:
+            rows.append([btn("📨 Mandarlo como instrucción", f"ins:{offer_token}")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def ai_summary(self, cq: CallbackQuery, sess: dict) -> None:
         if sess["id"] in self.ai_running:

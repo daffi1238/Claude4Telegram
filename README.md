@@ -46,6 +46,8 @@ Si hay varias sesiones activas en el proyecto, te deja elegir con un botón.
 
 **Pedir resumen y mandar lo siguiente.** El flujo típico desde el móvil: pides el resumen (`/resumen` o el botón 🧠 Resumen IA), y luego mandas la siguiente instrucción con **`/di haz lo siguiente…`**. `/di` la entrega a la sesión al instante: resuelve el 🏁 si Claude estaba esperando, la teclea por tmux si la sesión está abierta, o la deja en cola para el próximo arranque. También sirve responder al mensaje 🏁 "Claude ha terminado" o mandar una nota de voz.
 
+Si escribes texto suelto en el tema (que de normal da el resumen), el bot añade debajo un botón **📨 Mandarlo como instrucción**: tócalo y ese mismo texto se entrega a la sesión, sin tener que reescribirlo con `/di`.
+
 Debajo del resumen hay un botón **🧠 Resumen IA**: manda un extracto de la conversación (tus instrucciones, las respuestas de Claude y las herramientas usadas, unos 40 000 caracteres como máximo) a `claude -p` sin herramientas y te devuelve objetivo, hecho, estado, pendiente y siguiente paso. Este sí gasta tokens:
 
 - Se lanza en la carpeta del proyecto, así que usa su misma configuración: en un proyecto DeepSeek resume DeepSeek con el modelo del proyecto; en uno Claude, `haiku` (`C4T_SUMMARY_MODEL`).
