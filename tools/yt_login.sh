@@ -45,8 +45,9 @@ DISPLAY=":$DISPLAY_NUM" chromium --user-data-dir="$PROFILE" --no-first-run --no-
 x11vnc -display ":$DISPLAY_NUM" -localhost -nopw -forever -shared -quiet >/dev/null 2>&1 & X11VNC_PID=$!
 sleep 1
 # Todo en IPv4 explícito: cloudflared resuelve localhost por IPv6 y no encontraría a websockify.
-websockify --web="$NOVNC" "127.0.0.1:$PORT" "127.0.0.1:$VNC_PORT" >/dev/null 2>&1 & WS_PID=$!
-cloudflared tunnel --url "http://127.0.0.1:$PORT" >"$CF_LOG" 2>&1 & CF_PID=$!
+websockify --web="$NOVNC" --heartbeat 30 "127.0.0.1:$PORT" "127.0.0.1:$VNC_PORT" >/dev/null 2>&1 & WS_PID=$!
+# --protocol http2: los WebSockets sobre quick tunnels QUIC fallan a menudo (la página carga pero el VNC no conecta).
+cloudflared tunnel --protocol http2 --url "http://127.0.0.1:$PORT" >"$CF_LOG" 2>&1 & CF_PID=$!
 
 URL=""
 for _ in $(seq 1 40); do
@@ -56,6 +57,8 @@ for _ in $(seq 1 40); do
 done
 [ -z "$URL" ] && { echo "ERROR=no se obtuvo URL del túnel"; exit 4; }
 
-echo "URL=${URL}/vnc.html?autoconnect=1&resize=scale"
+# Parámetros explícitos para que noVNC construya bien el WebSocket a través del túnel (host/puerto/cifrado).
+DOMAIN="${URL#https://}"
+echo "URL=${URL}/vnc.html?autoconnect=1&resize=scale&path=websockify&host=${DOMAIN}&port=443&encrypt=1&reconnect=1"
 echo "SECONDS=$DURATION"
 sleep "$DURATION"
