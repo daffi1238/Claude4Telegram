@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,7 +35,8 @@ from .state import State
 from .hub import Hub, HISTORY_MESSAGES
 from . import voice
 from .summary import ago, md_bold, render_line, render_summary, transcript_of
-from .ai_summary import summarize
+from .ai_summary import ask_claude, summarize
+from . import youtube
 
 log = logging.getLogger("c4t")
 
@@ -59,6 +61,22 @@ VOICE_SUMMARY_SYSTEM = (
 VOICE_SUMMARY_INPUT = 6000   # caracteres de la respuesta que se mandan a resumir (contexto acotado del hub)
 CHAT_MSGS_CAP = 200          # respuestas de /chat recordadas para continuar al responderlas
 OFFERED_CAP = 50             # textos sueltos ofrecidos como instrucción con un botón
+YT_TRANSCRIPT_CAP = 120000   # caracteres de la transcripción que se mandan a Claude
+YT_DIGEST_SYSTEM = (
+    "Eres un analista que resume en español la transcripción de un vídeo de YouTube para alguien que no "
+    "va a verlo. La transcripción es automática y puede tener erratas; interprétala con sentido.\n"
+    "Primero identifica la temática y adapta lo que extraes:\n"
+    "- Economía, finanzas, trading o inversión: CONCLUSIONES principales, EMPRESAS afectadas (con su ticker "
+    "si se deduce), ETFs y activos mencionados, cifras o niveles clave, y cualquier dato accionable "
+    "(riesgos, catalizadores, fechas).\n"
+    "- Tecnología: TECNOLOGÍAS, herramientas, productos o modelos mencionados, elementos o puntos clave y "
+    "conclusiones prácticas.\n"
+    "- Cualquier otro caso: puntos clave y conclusiones.\n"
+    "Estructura con apartados breves y viñetas. Sé concreto y no inventes nada que no esté en la "
+    "transcripción; si algo no aparece, omítelo.\n"
+    "Termina SIEMPRE con un apartado «🔎 Mi opinión» con tu visión objetiva sobre la verosimilitud y "
+    "fiabilidad del contenido (solidez de los argumentos, sesgos, afirmaciones dudosas o promocionales), "
+    "como segunda opinión para el usuario.")
 
 HELP = (
     "<b>claude4Telegram</b>\n"
@@ -518,6 +536,11 @@ class Broker:
             if m.reply_to_message and m.reply_to_message.message_id in self.chat_msgs:
                 await self.do_chat(m, m.text)
                 return
+            # Un enlace de YouTube dispara el resumen del vídeo (en cualquier tema).
+            url = youtube.find_url(m.text)
+            if url:
+                await self.handle_youtube(m, url)
+                return
             req = None
             if m.reply_to_message and m.reply_to_message.message_id in self.msg_to_req:
                 req = self.pending.get(self.msg_to_req[m.reply_to_message.message_id])
@@ -784,6 +807,50 @@ class Broker:
         if len(self.chat_msgs) > CHAT_MSGS_CAP:     # no crece sin límite; responder a uno viejo da resumen
             for mid in list(self.chat_msgs)[:-CHAT_MSGS_CAP]:
                 del self.chat_msgs[mid]
+
+    async def handle_youtube(self, m: Message, url: str) -> None:
+        """Enlace de YouTube → audio (yt-dlp) → transcripción (hub) → resumen temático (Claude suscripción)."""
+        if not self.hub.enabled:
+            await m.reply("No tengo acceso al modelo local de Whisper para transcribir (hub sin configurar).")
+            return
+        note = await m.reply("🎬 Descargando el audio de YouTube…")
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                audio, title = await youtube.download_audio(
+                    url, Path(tmp), self.cfg.yt_cookies, self.cfg.yt_cookies_browser, self.cfg.yt_max_minutes)
+            except youtube.SignInRequired:
+                await self.edit_or_reply(note, m, "🔒 YouTube pide cookies de una sesión iniciada para "
+                    "descargar. En el equipo: inicia sesión en YouTube en un navegador y pon "
+                    "<code>C4T_YT_COOKIES_BROWSER=chromium</code> (o exporta un cookies.txt en "
+                    "<code>C4T_YT_COOKIES</code>). La contraseña/cookies nunca pasan por Telegram.")
+                return
+            except Exception as e:
+                await self.edit_or_reply(note, m, f"⚠️ No pude descargar el audio: {esc(clip(str(e), 300))}")
+                return
+            await self.edit_or_reply(note, m, f"🎧 Transcribiendo «{esc(clip(title, 120))}»…")
+            try:
+                transcript = await self.hub.transcribe(audio.read_bytes(), audio.name)
+            except Exception as e:
+                await self.edit_or_reply(note, m, f"⚠️ No pude transcribir: {esc(clip(str(e), 300))}")
+                return
+        if not transcript:
+            await self.edit_or_reply(note, m, "⚠️ La transcripción salió vacía.")
+            return
+        await self.edit_or_reply(note, m, f"🧠 Resumiendo «{esc(clip(title, 120))}»…")
+        try:
+            content = f"Título del vídeo: {title}\nURL: {url}\n\nTranscripción:\n{transcript[:YT_TRANSCRIPT_CAP]}"
+            summary = await ask_claude(YT_DIGEST_SYSTEM, content, self.cfg.summary_model, self.cfg.claude_bin)
+        except Exception as e:
+            await self.edit_or_reply(note, m, f"⚠️ No pude resumir: {esc(clip(str(e), 300))}")
+            return
+        head = f"🎬 <b>{esc(clip(title, 200))}</b>\n\n"
+        full = head + md_bold(esc(summary))
+        if len(full) <= 3900:
+            await self.edit_or_reply(note, m, full)
+        else:
+            await self.edit_or_reply(note, m, head + "📄 Resumen completo en el archivo adjunto.")
+            await send_media(self.bot, self.cfg.chat_id, m.message_thread_id, "resumen.md",
+                             f"# {title}\n\n{summary}".encode(), f"🎬 {esc(clip(title, 200))}", "document")
 
     async def compact_reply(self, message: str) -> str:
         """Resumen de la respuesta de Claude a ≤1500 car. para texto + audio; si falla, el texto a secas."""

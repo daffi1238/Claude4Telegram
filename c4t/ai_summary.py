@@ -91,3 +91,28 @@ async def summarize(sess: dict, transcript_path: str, model: str, binary: str = 
         detail = (err or out).decode(errors="replace").strip()[-300:] or f"código {proc.returncode}"
         raise RuntimeError(detail)
     return out.decode(errors="replace").strip()
+
+
+async def ask_claude(instructions: str, content: str, model: str = "", binary: str = "",
+                     timeout: int = TIMEOUT) -> str:
+    """Lanza `claude -p` (suscripción) con unas instrucciones y un texto. Para resumir, analizar, etc.
+
+    Se ejecuta en el home (no en un proyecto), así usa el Claude de la suscripción y no la config
+    de un proyecto DeepSeek. Lanza RuntimeError con un mensaje legible si falla."""
+    b = claude_bin(binary)
+    if not b:
+        raise RuntimeError("no encuentro el comando claude (define C4T_CLAUDE_BIN en .env)")
+    cmd = [b, "-p", "--tools", "", "--no-session-persistence", "--output-format", "text"]
+    if model:
+        cmd += ["--model", model]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=str(Path.home()), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE, env={**os.environ, "C4T_DISABLE": "1"})
+    try:
+        out, err = await asyncio.wait_for(proc.communicate((instructions + "\n\n" + content).encode()), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"Claude no respondió en {timeout} s") from None
+    if proc.returncode != 0 or not out.strip():
+        raise RuntimeError((err or out).decode(errors="replace").strip()[-300:] or f"código {proc.returncode}")
+    return out.decode(errors="replace").strip()

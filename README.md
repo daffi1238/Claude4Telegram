@@ -140,6 +140,17 @@ Manda una **imagen** al tema y, además de guardarla, el hub le pasa el **OCR**:
 
 `/chat <mensaje>` habla con el modelo del hub desde cualquier tema; **responde** a su respuesta para seguir la conversación (mantiene algo de contexto). El texto suelto sin nada pendiente sigue devolviendo el resumen de estado.
 
+### Resumen de vídeos de YouTube
+
+Pega un **enlace de YouTube** en cualquier tema y el bot descarga el audio (yt-dlp), lo transcribe con el hub (Whisper) y Claude (tu suscripción) hace un **resumen temático**:
+
+- **Economía/trading:** conclusiones, empresas afectadas (con ticker), ETFs y activos, cifras y datos accionables.
+- **Tecnología:** tecnologías/herramientas mencionadas, puntos clave y conclusiones.
+- **Cualquier tema:** puntos clave y conclusiones.
+- Y siempre termina con **🔎 Mi opinión**: una valoración objetiva de la verosimilitud del contenido, como segunda opinión.
+
+Funciona en todos los temas sin tocar nada en los proyectos. La descarga necesita **cookies de una sesión de YouTube iniciada** (YouTube pide "Sign in to confirm you're not a bot"): inicia sesión en YouTube en un navegador del equipo y pon `C4T_YT_COOKIES_BROWSER=chromium`, o exporta un `cookies.txt` en `C4T_YT_COOKIES`. Las cookies nunca pasan por Telegram. Sin hub configurado, el bot avisa de que no tiene Whisper local.
+
 > El hub atiende **de uno en uno** y cambiar de tipo de modelo (chat→voz→OCR) cuesta unos segundos; el broker serializa las llamadas y usa timeouts holgados. Necesitas `ffmpeg` para la respuesta hablada. Sin hub configurado, estas tres funciones quedan desactivadas y las notas de voz se tratan como archivos normales.
 
 ## Cómo se entera cada sesión
@@ -156,7 +167,8 @@ Claude Code solo habla con el broker a través de los hooks, así que el broker 
 
 - tmux (opcional, recomendado: permite responder desde el terminal o Telegram, lo que llegue antes; también es lo que permite inyectar instrucciones de voz en vivo)
 - `gpg` y `7z` (p7zip) para descifrar archivos (opcional)
-- Un hub de modelos local tipo OpenAI (opcional, para voz/OCR/chat) y `ffmpeg` para la respuesta hablada
+- Un hub de modelos local tipo OpenAI (opcional, para voz/OCR/chat/YouTube) y `ffmpeg` para la respuesta hablada
+- `yt-dlp` (opcional, para resumir vídeos de YouTube)
 - Linux con systemd (para el servicio; el broker en sí funciona en cualquier sistema con Python)
 - Python 3.10+
 - Claude Code 2.1 o superior (hooks `PermissionRequest` y `Stop` con `last_assistant_message`)

@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from c4t import voice
+from c4t import youtube
 from c4t.config import load_config
 from c4t.media import guess_kind
 from c4t.inbox import safe_name, git_root
@@ -40,6 +41,23 @@ class Speakable(unittest.TestCase):
 
     def test_vacio(self):
         self.assertEqual(voice.speakable("   \n  "), "")
+
+
+class YouTube(unittest.TestCase):
+    def test_detecta(self):
+        self.assertEqual(youtube.find_url("mira https://youtu.be/XY12zAB-9qQ?t=5 wow"),
+                         "https://youtu.be/XY12zAB-9qQ?t=5")
+        self.assertTrue(youtube.find_url("https://www.youtube.com/watch?v=abc123DEF_g"))
+        self.assertTrue(youtube.find_url("https://www.youtube.com/shorts/aQ_bQ12cdef"))
+
+    def test_ignora(self):
+        self.assertIsNone(youtube.find_url("sin enlaces"))
+        self.assertIsNone(youtube.find_url("https://vimeo.com/123"))
+
+    def test_titulo_limpio(self):
+        import re
+        stem = "Mi vídeo sobre bolsa [dQw4w9WgXcQ]"
+        self.assertEqual(re.sub(r"\s*\[[\w\-]+\]$", "", stem).strip(), "Mi vídeo sobre bolsa")
 
 
 class GuessKind(unittest.TestCase):
