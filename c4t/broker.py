@@ -888,9 +888,12 @@ class Broker:
             self.ytlogin_proc = None
             await self.edit_or_reply(note, m, "⚠️ No obtuve la URL del túnel.")
             return
-        kb = InlineKeyboardMarkup(inline_keyboard=[[btn("🛑 Cerrar ahora", "ytlogin:stop")]])
-        text = (f"🖥 <b>Navegador temporal ({max(1, seconds // 60)} min)</b>\n{esc(url)}\n\n"
-                "Ábrelo, inicia sesión en YouTube y cierra al terminar (se cierra solo al acabar el tiempo).\n"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🌐 Abrir navegador", url=url)],
+            [btn("🛑 Cerrar ahora", "ytlogin:stop")]])
+        text = (f"🖥 <b>Navegador temporal ({max(1, seconds // 60)} min)</b>\n"
+                f"Toca <b>🌐 Abrir navegador</b> (o copia el enlace):\n<code>{esc(url)}</code>\n\n"
+                "Inicia sesión en YouTube y cierra al terminar (se cierra solo al acabar el tiempo).\n"
                 "⚠️ Exposición pública temporal: no compartas el enlace. La sesión queda guardada en el equipo "
                 "para las descargas.")
         try:
