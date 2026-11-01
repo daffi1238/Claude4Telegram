@@ -42,7 +42,9 @@ for _ in $(seq 1 10); do [ -e "/tmp/.X11-unix/X$DISPLAY_NUM" ] && break; sleep 0
 DISPLAY=":$DISPLAY_NUM" chromium --user-data-dir="$PROFILE" --no-first-run --no-default-browser-check \
     --disable-dev-shm-usage --no-sandbox --password-store=basic --start-maximized \
     "https://www.youtube.com" >/dev/null 2>&1 & CHROME_PID=$!
-x11vnc -display ":$DISPLAY_NUM" -localhost -nopw -forever -shared -quiet >/dev/null 2>&1 & X11VNC_PID=$!
+# -rfbport fijo: si no, x11vnc escoge 5900 y websockify (que apunta a 5900+display) no lo encuentra.
+x11vnc -display ":$DISPLAY_NUM" -rfbport "$VNC_PORT" -localhost -nopw -forever -shared -quiet \
+    >/dev/null 2>&1 & X11VNC_PID=$!
 sleep 1
 # Todo en IPv4 explícito: cloudflared resuelve localhost por IPv6 y no encontraría a websockify.
 websockify --web="$NOVNC" --heartbeat 30 "127.0.0.1:$PORT" "127.0.0.1:$VNC_PORT" >/dev/null 2>&1 & WS_PID=$!
