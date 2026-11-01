@@ -153,9 +153,10 @@ Funciona en todos los temas sin tocar nada en los proyectos. Sin hub configurado
 
 **Cookies (la descarga las necesita).** YouTube pide "Sign in to confirm you're not a bot", así que yt-dlp necesita las cookies de una sesión iniciada. Tres formas:
 
-1. **Navegador del equipo:** inicia sesión en YouTube en un navegador del equipo y pon `C4T_YT_COOKIES_BROWSER=chromium`.
-2. **cookies.txt en el equipo:** exporta un `cookies.txt` (formato Netscape) y ponlo en `C4T_YT_COOKIES`.
-3. **Desde el móvil, por Telegram:** exporta el `cookies.txt` en el móvil (un navegador con una extensión tipo "Get cookies.txt LOCALLY", estando logueado en YouTube) y **envíalo al bot con el texto `/cookies` como pie**. Se guarda en el equipo (`state_dir/yt-cookies.txt`, permisos 600). Como un `cookies.txt` da acceso a tu sesión de Google, mándalo **cifrado** (.7z/.gpg con la contraseña configurada con `c4t_key.py --proyecto youtube`): se descifra en local y la contraseña nunca pasa por Telegram.
+1. **`/ytlogin` (lo más cómodo, todo desde el móvil):** el bot abre un **navegador temporal en el equipo** y te manda un enlace (noVNC a través de un túnel efímero de Cloudflare, abierto solo unos minutos). Lo abres desde el móvil, inicias sesión en YouTube tú mismo (sin detección de bot) y la sesión queda guardada en el equipo para las descargas. La exposición es **siempre temporal** (`C4T_YT_LOGIN_SECONDS`, 5 min por defecto) y hay un botón para cerrarla antes. Necesita `Xvfb`, `chromium`, `x11vnc`, `websockify`, `cloudflared` y los ficheros de [noVNC](https://github.com/novnc/noVNC) en `~/.local/share/novnc`.
+2. **Navegador del equipo:** inicia sesión en YouTube en un navegador del equipo y pon `C4T_YT_COOKIES_BROWSER=chromium`.
+3. **cookies.txt en el equipo:** exporta un `cookies.txt` (formato Netscape) y ponlo en `C4T_YT_COOKIES`.
+4. **Enviar el cookies.txt por Telegram:** exporta el `cookies.txt` en el móvil (un navegador con una extensión tipo "Get cookies.txt LOCALLY", estando logueado en YouTube) y **envíalo al bot con el texto `/cookies` como pie**. Se guarda en el equipo (`state_dir/yt-cookies.txt`, permisos 600). Como un `cookies.txt` da acceso a tu sesión de Google, mándalo **cifrado** (.7z/.gpg con la contraseña configurada con `c4t_key.py --proyecto youtube`): se descifra en local y la contraseña nunca pasa por Telegram.
 
 La cookie caduca cada cierto tiempo; cuando falle, reenvíala.
 
@@ -176,7 +177,7 @@ Claude Code solo habla con el broker a través de los hooks, así que el broker 
 - tmux (opcional, recomendado: permite responder desde el terminal o Telegram, lo que llegue antes; también es lo que permite inyectar instrucciones de voz en vivo)
 - `gpg` y `7z` (p7zip) para descifrar archivos (opcional)
 - Un hub de modelos local tipo OpenAI (opcional, para voz/OCR/chat/YouTube) y `ffmpeg` para la respuesta hablada
-- `yt-dlp` (opcional, para resumir vídeos de YouTube)
+- `yt-dlp` (opcional, para resumir vídeos de YouTube); para `/ytlogin`: `Xvfb`, `chromium`, `x11vnc`, `websockify`, `cloudflared` y noVNC
 - Linux con systemd (para el servicio; el broker en sí funciona en cualquier sistema con Python)
 - Python 3.10+
 - Claude Code 2.1 o superior (hooks `PermissionRequest` y `Stop` con `last_assistant_message`)

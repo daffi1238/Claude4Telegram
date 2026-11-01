@@ -8,8 +8,10 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import secrets
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -87,6 +89,7 @@ HELP = (
     "con 🧠 Resumen IA, un modelo te lo resume\n"
     "/chat — conversa con el modelo local (responde a su respuesta para seguir)\n"
     "/di — manda la siguiente instrucción a la sesión del tema\n"
+    "/ytlogin — abre un navegador temporal para iniciar sesión en YouTube (para resumir vídeos)\n"
     "/id — ids de chat, usuario y tema\n\n"
     "Para texto libre, <b>responde</b> al mensaje del bot (o escribe en el tema si solo hay una pregunta pendiente)."
 )
@@ -127,6 +130,7 @@ class Broker:
         self.chat_history: dict[int, list[dict]] = {}  # thread_id -> conversación con el hub (/chat)
         self.chat_msgs: dict[int, int] = {}            # message_id de una respuesta de /chat -> thread_id
         self.offered: dict[str, tuple[int, str]] = {}  # token -> (thread_id, texto) ofrecido como instrucción
+        self.ytlogin_proc: asyncio.subprocess.Process | None = None  # navegador efímero de /ytlogin en curso
 
     # ------------------------------------------------------------------ Telegram helpers
 
@@ -530,6 +534,11 @@ class Broker:
                 return
             await self.send_instruction(m, text)
 
+        @r.message(Command("ytlogin"))
+        async def cmd_ytlogin(m: Message):
+            if self.allowed(m.chat.id, m.from_user.id):
+                await self.ytlogin(m)
+
         @r.message(F.text & ~F.text.startswith("/"))
         async def on_text(m: Message):
             if not self.allowed(m.chat.id, m.from_user.id):
@@ -569,6 +578,13 @@ class Broker:
                 await self.ack(cq, "No autorizado")
                 return
             req_id, _, action = (cq.data or "").partition(":")
+            if req_id == "ytlogin":
+                if self.ytlogin_proc and self.ytlogin_proc.returncode is None:
+                    self.ytlogin_proc.terminate()
+                    await self.ack(cq, "Cerrando…")
+                else:
+                    await self.ack(cq, "Ya estaba cerrado")
+                return
             if req_id == "ins":
                 offer = self.offered.pop(action, None)
                 if offer is None:
@@ -817,6 +833,82 @@ class Broker:
         sent = self.cfg.state_dir / "yt-cookies.txt"
         return str(sent) if sent.exists() else ""
 
+    def yt_cookies_browser(self) -> str:
+        """Navegador de cookies: el del .env, o el perfil del navegador de /ytlogin si ya tiene sesión."""
+        if self.cfg.yt_cookies_browser:
+            return self.cfg.yt_cookies_browser
+        profile = Path(self.cfg.yt_browser_profile).expanduser()
+        if (profile / "Default" / "Cookies").exists():
+            return f"chromium:{profile}"
+        return ""
+
+    async def ytlogin(self, m: Message) -> None:
+        """Abre un navegador efímero (noVNC + cloudflared) para iniciar sesión en YouTube desde el móvil."""
+        missing = [b for b in ("Xvfb", "chromium", "x11vnc", "websockify", "cloudflared") if not shutil.which(b)]
+        if missing:
+            await m.reply(f"Falta software en el equipo para el navegador: {', '.join(missing)}.")
+            return
+        if self.ytlogin_proc and self.ytlogin_proc.returncode is None:
+            await m.reply("Ya hay un navegador de login abierto. Ciérralo o espera a que caduque.")
+            return
+        script = Path(__file__).resolve().parent.parent / "tools" / "yt_login.sh"
+        if not script.exists():
+            await m.reply("No encuentro <code>tools/yt_login.sh</code>.")
+            return
+        note = await m.reply("🖥 Abriendo navegador temporal y túnel… (unos segundos)")
+        env = {**os.environ, "C4T_YT_LOGIN_SECONDS": str(self.cfg.yt_login_seconds),
+               "C4T_YT_PROFILE": str(Path(self.cfg.yt_browser_profile).expanduser())}
+        proc = await asyncio.create_subprocess_exec(
+            "bash", str(script), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env)
+        self.ytlogin_proc = proc
+        url, seconds = None, self.cfg.yt_login_seconds
+        try:
+            while True:
+                line = await asyncio.wait_for(proc.stdout.readline(), 90)
+                if not line:
+                    break
+                s = line.decode(errors="replace").strip()
+                if s.startswith("URL="):
+                    url = s[4:]
+                elif s.startswith("SECONDS="):
+                    seconds = int(s[8:]) if s[8:].isdigit() else seconds
+                    break
+                elif s.startswith(("ERROR=", "FALTA=")):
+                    proc.kill()
+                    self.ytlogin_proc = None
+                    await self.edit_or_reply(note, m, f"⚠️ No se pudo abrir el navegador: {esc(s)}")
+                    return
+        except asyncio.TimeoutError:
+            proc.kill()
+            self.ytlogin_proc = None
+            await self.edit_or_reply(note, m, "⚠️ El túnel no respondió a tiempo.")
+            return
+        if not url:
+            proc.kill()
+            self.ytlogin_proc = None
+            await self.edit_or_reply(note, m, "⚠️ No obtuve la URL del túnel.")
+            return
+        kb = InlineKeyboardMarkup(inline_keyboard=[[btn("🛑 Cerrar ahora", "ytlogin:stop")]])
+        text = (f"🖥 <b>Navegador temporal ({max(1, seconds // 60)} min)</b>\n{esc(url)}\n\n"
+                "Ábrelo, inicia sesión en YouTube y cierra al terminar (se cierra solo al acabar el tiempo).\n"
+                "⚠️ Exposición pública temporal: no compartas el enlace. La sesión queda guardada en el equipo "
+                "para las descargas.")
+        try:
+            await note.edit_text(text, reply_markup=kb)
+        except TelegramBadRequest:
+            await m.reply(text, reply_markup=kb)
+        asyncio.create_task(self._ytlogin_watch(m.chat.id, m.message_thread_id, proc))
+
+    async def _ytlogin_watch(self, chat_id: int, thread_id: int | None, proc) -> None:
+        await proc.wait()
+        if self.ytlogin_proc is proc:
+            self.ytlogin_proc = None
+        try:
+            await self.bot.send_message(chat_id, "🖥 Navegador de login cerrado. Si iniciaste sesión, ya puedo "
+                                        "descargar vídeos de YouTube.", message_thread_id=thread_id)
+        except TelegramBadRequest:
+            pass
+
     async def save_cookies(self, m: Message) -> None:
         """Guarda un cookies.txt de YouTube enviado por Telegram (se descifra en local si viene cifrado)."""
         media = m.document
@@ -859,7 +951,7 @@ class Broker:
         with tempfile.TemporaryDirectory() as tmp:
             try:
                 audio, title = await youtube.download_audio(
-                    url, Path(tmp), self.yt_cookies_path(), self.cfg.yt_cookies_browser, self.cfg.yt_max_minutes)
+                    url, Path(tmp), self.yt_cookies_path(), self.yt_cookies_browser(), self.cfg.yt_max_minutes)
             except youtube.SignInRequired:
                 if self.yt_cookies_path() or self.cfg.yt_cookies_browser:
                     msg = ("🔒 Las cookies de YouTube han caducado o ya no sirven. Expórtalas de nuevo en el "
@@ -1043,6 +1135,7 @@ async def run(cfg: Config) -> None:
             BotCommand(command="resumen", description="Qué está haciendo cada sesión"),
             BotCommand(command="chat", description="Conversar con el modelo local"),
             BotCommand(command="di", description="Mandar la siguiente instrucción a la sesión"),
+            BotCommand(command="ytlogin", description="Navegador temporal para login de YouTube"),
             BotCommand(command="id", description="Mostrar ids"),
         ])
 
