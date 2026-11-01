@@ -149,7 +149,15 @@ Pega un **enlace de YouTube** en cualquier tema y el bot descarga el audio (yt-d
 - **Cualquier tema:** puntos clave y conclusiones.
 - Y siempre termina con **🔎 Mi opinión**: una valoración objetiva de la verosimilitud del contenido, como segunda opinión.
 
-Funciona en todos los temas sin tocar nada en los proyectos. La descarga necesita **cookies de una sesión de YouTube iniciada** (YouTube pide "Sign in to confirm you're not a bot"): inicia sesión en YouTube en un navegador del equipo y pon `C4T_YT_COOKIES_BROWSER=chromium`, o exporta un `cookies.txt` en `C4T_YT_COOKIES`. Las cookies nunca pasan por Telegram. Sin hub configurado, el bot avisa de que no tiene Whisper local.
+Funciona en todos los temas sin tocar nada en los proyectos. Sin hub configurado, el bot avisa de que no tiene Whisper local.
+
+**Cookies (la descarga las necesita).** YouTube pide "Sign in to confirm you're not a bot", así que yt-dlp necesita las cookies de una sesión iniciada. Tres formas:
+
+1. **Navegador del equipo:** inicia sesión en YouTube en un navegador del equipo y pon `C4T_YT_COOKIES_BROWSER=chromium`.
+2. **cookies.txt en el equipo:** exporta un `cookies.txt` (formato Netscape) y ponlo en `C4T_YT_COOKIES`.
+3. **Desde el móvil, por Telegram:** exporta el `cookies.txt` en el móvil (un navegador con una extensión tipo "Get cookies.txt LOCALLY", estando logueado en YouTube) y **envíalo al bot con el texto `/cookies` como pie**. Se guarda en el equipo (`state_dir/yt-cookies.txt`, permisos 600). Como un `cookies.txt` da acceso a tu sesión de Google, mándalo **cifrado** (.7z/.gpg con la contraseña configurada con `c4t_key.py --proyecto youtube`): se descifra en local y la contraseña nunca pasa por Telegram.
+
+La cookie caduca cada cierto tiempo; cuando falle, reenvíala.
 
 > El hub atiende **de uno en uno** y cambiar de tipo de modelo (chat→voz→OCR) cuesta unos segundos; el broker serializa las llamadas y usa timeouts holgados. Necesitas `ffmpeg` para la respuesta hablada. Sin hub configurado, estas tres funciones quedan desactivadas y las notas de voz se tratan como archivos normales.
 

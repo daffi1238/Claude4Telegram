@@ -27,7 +27,7 @@ from aiohttp import web
 
 from .config import Config
 from .render import clip, esc, header, last_assistant_text, pre, provider_of, render_tool
-from .inbox import describe_for_claude, git_root, inbox_dir, key_for, session_context, stamped
+from .inbox import describe_for_claude, git_root, inbox_dir, key_for, safe_name, session_context, stamped
 from .inbox import process as process_incoming
 from .media import MAX_UPLOAD, send_media
 from .presence import typed_since
@@ -495,7 +495,9 @@ class Broker:
         async def on_file(m: Message):
             if not self.allowed(m.chat.id, m.from_user.id):
                 return
-            if (m.voice or m.video_note) and self.hub.enabled:
+            if m.document and (m.caption or "").strip().lower().startswith("/cookies"):
+                await self.save_cookies(m)    # cookies.txt de YouTube
+            elif (m.voice or m.video_note) and self.hub.enabled:
                 await self.receive_voice(m)   # nota de voz → instrucción
             else:
                 await self.receive_file(m)    # cualquier otro archivo (con OCR si es imagen)
@@ -808,6 +810,46 @@ class Broker:
             for mid in list(self.chat_msgs)[:-CHAT_MSGS_CAP]:
                 del self.chat_msgs[mid]
 
+    def yt_cookies_path(self) -> str:
+        """Ruta de cookies activa: la del .env, o la que hayas mandado por Telegram (state_dir/yt-cookies.txt)."""
+        if self.cfg.yt_cookies:
+            return self.cfg.yt_cookies
+        sent = self.cfg.state_dir / "yt-cookies.txt"
+        return str(sent) if sent.exists() else ""
+
+    async def save_cookies(self, m: Message) -> None:
+        """Guarda un cookies.txt de YouTube enviado por Telegram (se descifra en local si viene cifrado)."""
+        media = m.document
+        if (media.file_size or 0) > TELEGRAM_DOWNLOAD_LIMIT:
+            await m.reply("El archivo de cookies es demasiado grande (máx. 20 MB).")
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / safe_name(media.file_name or "cookies.txt")
+            await self.bot.download(media, destination=dest)
+            item = await process_incoming(dest, key_for(self.cfg.state_dir / "keys", "youtube"))
+            if not item.usable:
+                key_cmd = f"python3 {Path(__file__).resolve().parent.parent / 'hooks' / 'c4t_key.py'} --proyecto youtube"
+                await m.reply(f"🔒 Venía cifrado y no pude abrirlo. En el equipo: <code>{esc(key_cmd)}</code> y reenvíalo.")
+                return
+            src = item.path
+            if src.is_dir():
+                txts = sorted(src.rglob("*.txt")) or [p for p in sorted(src.rglob("*")) if p.is_file()]
+                if not txts:
+                    await m.reply("No encontré ningún archivo de cookies dentro.")
+                    return
+                src = txts[0]
+            data = src.read_bytes()
+            if b"youtube.com" not in data and b"google.com" not in data:
+                await m.reply("Eso no parece un cookies.txt de YouTube (no veo dominios de Google). No lo guardo.")
+                return
+            path = self.cfg.state_dir / "yt-cookies.txt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            path.chmod(0o600)
+        await m.reply("🍪 Cookies de YouTube guardadas (permisos 600, solo en el equipo). Ya puedo descargar vídeos.\n"
+                      "⚠️ Un cookies.txt da acceso a tu sesión de Google: mándalo cifrado y no lo compartas. "
+                      "Si caduca, reenvíamelo.")
+
     async def handle_youtube(self, m: Message, url: str) -> None:
         """Enlace de YouTube → audio (yt-dlp) → transcripción (hub) → resumen temático (Claude suscripción)."""
         if not self.hub.enabled:
@@ -817,7 +859,7 @@ class Broker:
         with tempfile.TemporaryDirectory() as tmp:
             try:
                 audio, title = await youtube.download_audio(
-                    url, Path(tmp), self.cfg.yt_cookies, self.cfg.yt_cookies_browser, self.cfg.yt_max_minutes)
+                    url, Path(tmp), self.yt_cookies_path(), self.cfg.yt_cookies_browser, self.cfg.yt_max_minutes)
             except youtube.SignInRequired:
                 await self.edit_or_reply(note, m, "🔒 YouTube pide cookies de una sesión iniciada para "
                     "descargar. En el equipo: inicia sesión en YouTube en un navegador y pon "
