@@ -861,10 +861,15 @@ class Broker:
                 audio, title = await youtube.download_audio(
                     url, Path(tmp), self.yt_cookies_path(), self.cfg.yt_cookies_browser, self.cfg.yt_max_minutes)
             except youtube.SignInRequired:
-                await self.edit_or_reply(note, m, "🔒 YouTube pide cookies de una sesión iniciada para "
-                    "descargar. En el equipo: inicia sesión en YouTube en un navegador y pon "
-                    "<code>C4T_YT_COOKIES_BROWSER=chromium</code> (o exporta un cookies.txt en "
-                    "<code>C4T_YT_COOKIES</code>). La contraseña/cookies nunca pasan por Telegram.")
+                if self.yt_cookies_path() or self.cfg.yt_cookies_browser:
+                    msg = ("🔒 Las cookies de YouTube han caducado o ya no sirven. Expórtalas de nuevo en el "
+                           "móvil y <b>reenvíamelas con el pie <code>/cookies</code></b> (mejor cifradas).")
+                else:
+                    msg = ("🔒 YouTube pide cookies de una sesión iniciada. Exporta un <code>cookies.txt</code> en "
+                           "el móvil (Firefox/Kiwi, extensión «Get cookies.txt LOCALLY») y mándamelo con el pie "
+                           "<code>/cookies</code>; o pon <code>C4T_YT_COOKIES_BROWSER</code> en el equipo. "
+                           "Mándalo cifrado (.7z/.gpg) y la contraseña nunca pasa por Telegram.")
+                await self.edit_or_reply(note, m, msg)
                 return
             except Exception as e:
                 await self.edit_or_reply(note, m, f"⚠️ No pude descargar el audio: {esc(clip(str(e), 300))}")
