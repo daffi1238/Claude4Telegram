@@ -24,11 +24,17 @@ PORT="${C4T_YT_VNC_WEB_PORT:-$(python3 -c 'import socket;s=socket.socket();s.bin
 
 CF_PID=""; WS_PID=""; X11VNC_PID=""; CHROME_PID=""; XVFB_PID=""
 cleanup() {
+    trap - EXIT INT TERM
     kill "$CF_PID" "$WS_PID" "$X11VNC_PID" "$CHROME_PID" "$XVFB_PID" 2>/dev/null
+    pkill -P $$ 2>/dev/null
+    # Barrido por marcadores ÚNICOS de ESTE stack (chromium y cloudflared hacen setsid y escapan del grupo).
+    [ -n "${PROFILE:-}" ]   && pkill -f "user-data-dir=$PROFILE" 2>/dev/null
+    [ -n "${PORT:-}" ]      && pkill -f "127.0.0.1:$PORT" 2>/dev/null
+    [ -n "${VNC_PORT:-}" ]  && pkill -f "rfbport $VNC_PORT" 2>/dev/null
+    [ -n "${DISPLAY_NUM:-}" ] && pkill -f "Xvfb :$DISPLAY_NUM " 2>/dev/null
     rm -f "$CF_LOG"
-    wait 2>/dev/null
 }
-trap cleanup EXIT INT TERM
+trap 'cleanup; exit 0' EXIT INT TERM
 
 for bin in Xvfb chromium x11vnc websockify cloudflared; do
     command -v "$bin" >/dev/null || { echo "FALTA=$bin"; exit 3; }
@@ -62,5 +68,7 @@ done
 # Parámetros explícitos para que noVNC construya bien el WebSocket a través del túnel (host/puerto/cifrado).
 DOMAIN="${URL#https://}"
 echo "URL=${URL}/vnc.html?autoconnect=1&resize=scale&path=websockify&host=${DOMAIN}&port=443&encrypt=1&reconnect=1"
+echo "MARK=$PORT $VNC_PORT $DISPLAY_NUM $PROFILE"   # para que el broker pueda matar este stack sin lugar a dudas
 echo "SECONDS=$DURATION"
-sleep "$DURATION"
+# `wait` (a diferencia de `sleep` directo) SÍ es interrumpible por SIGTERM: el trap salta al instante.
+sleep "$DURATION" & wait $!

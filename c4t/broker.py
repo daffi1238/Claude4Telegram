@@ -11,7 +11,9 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import shutil
+import signal
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -131,6 +133,8 @@ class Broker:
         self.chat_msgs: dict[int, int] = {}            # message_id de una respuesta de /chat -> thread_id
         self.offered: dict[str, tuple[int, str]] = {}  # token -> (thread_id, texto) ofrecido como instrucción
         self.ytlogin_proc: asyncio.subprocess.Process | None = None  # navegador efímero de /ytlogin en curso
+        self.ytlogin_pgid: int | None = None                         # su grupo de procesos (para matarlo entero)
+        self.ytlogin_marks: list[str] | None = None                  # [port, vnc, display, profile] para matar por marcador
 
     # ------------------------------------------------------------------ Telegram helpers
 
@@ -579,11 +583,7 @@ class Broker:
                 return
             req_id, _, action = (cq.data or "").partition(":")
             if req_id == "ytlogin":
-                if self.ytlogin_proc and self.ytlogin_proc.returncode is None:
-                    self.ytlogin_proc.terminate()
-                    await self.ack(cq, "Cerrando…")
-                else:
-                    await self.ack(cq, "Ya estaba cerrado")
+                await self.ack(cq, "Cerrando…" if self.stop_ytlogin() else "Ya estaba cerrado")
                 return
             if req_id == "ins":
                 offer = self.offered.pop(action, None)
@@ -859,8 +859,13 @@ class Broker:
         env = {**os.environ, "C4T_YT_LOGIN_SECONDS": str(self.cfg.yt_login_seconds),
                "C4T_YT_PROFILE": str(Path(self.cfg.yt_browser_profile).expanduser())}
         proc = await asyncio.create_subprocess_exec(
-            "bash", str(script), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env)
+            "bash", str(script), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            env=env, start_new_session=True)   # grupo propio: así podemos matarlo entero
         self.ytlogin_proc = proc
+        try:
+            self.ytlogin_pgid = os.getpgid(proc.pid)   # guardado ya: sirve aunque luego muera el líder
+        except ProcessLookupError:
+            self.ytlogin_pgid = None
         url, seconds = None, self.cfg.yt_login_seconds
         try:
             while True:
@@ -870,6 +875,8 @@ class Broker:
                 s = line.decode(errors="replace").strip()
                 if s.startswith("URL="):
                     url = s[4:]
+                elif s.startswith("MARK="):
+                    self.ytlogin_marks = s[5:].split(" ", 3)   # port vnc display profile
                 elif s.startswith("SECONDS="):
                     seconds = int(s[8:]) if s[8:].isdigit() else seconds
                     break
@@ -901,6 +908,53 @@ class Broker:
         except TelegramBadRequest:
             await m.reply(text, reply_markup=kb)
         asyncio.create_task(self._ytlogin_watch(m.chat.id, m.message_thread_id, proc))
+
+    def stop_ytlogin(self) -> bool:
+        """Mata el navegador efímero y TODO su grupo de procesos (túnel incluido). Robusto."""
+        proc = self.ytlogin_proc
+        if not proc or proc.returncode is not None:
+            return False
+        pgid = self.ytlogin_pgid
+
+        def sig(s):
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, s)
+                    return
+                except (ProcessLookupError, PermissionError):
+                    pass
+            try:
+                (proc.terminate if s == signal.SIGTERM else proc.kill)()
+            except ProcessLookupError:
+                pass
+
+        sig(signal.SIGTERM)
+
+        def marker_sweep(ksig: str):
+            # Mata por marcadores únicos de ESTE stack: cubre a chromium/cloudflared que hacen setsid y
+            # se escapan del grupo. Los puertos y el perfil son exclusivos de este lanzamiento.
+            marks = self.ytlogin_marks or []
+            pats = []
+            if len(marks) >= 1:
+                pats.append(f"127.0.0.1:{marks[0]}")        # websockify y cloudflared --url
+            if len(marks) >= 2:
+                pats.append(f"rfbport {marks[1]}")           # x11vnc
+            if len(marks) >= 3:
+                pats.append(f"Xvfb :{marks[2]} ")            # Xvfb
+            if len(marks) >= 4:
+                pats.append(f"user-data-dir={marks[3]}")     # chromium
+            for p in pats:
+                try:
+                    os.system(f"pkill -{ksig} -f {shlex.quote(p)} 2>/dev/null")
+                except Exception:
+                    pass
+
+        async def _sweep():
+            await asyncio.sleep(2)
+            sig(signal.SIGKILL)       # grupo
+            marker_sweep("KILL")      # y cualquier fugado por setsid
+        asyncio.create_task(_sweep())
+        return True
 
     async def _ytlogin_watch(self, chat_id: int, thread_id: int | None, proc) -> None:
         await proc.wait()
@@ -1147,4 +1201,5 @@ async def run(cfg: Config) -> None:
     try:
         await dp.start_polling(broker.bot, allowed_updates=["message", "callback_query"])
     finally:
+        broker.stop_ytlogin()   # no dejar un navegador/túnel abierto si se para el broker
         await runner.cleanup()
