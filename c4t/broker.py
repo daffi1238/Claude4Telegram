@@ -1014,9 +1014,16 @@ class Broker:
                 audio, title = await youtube.download_audio(
                     url, Path(tmp), self.yt_cookies_path(), self.yt_cookies_browser(), self.cfg.yt_max_minutes)
             except youtube.SignInRequired:
-                if self.yt_cookies_path() or self.cfg.yt_cookies_browser:
-                    msg = ("🔒 Las cookies de YouTube han caducado o ya no sirven. Expórtalas de nuevo en el "
-                           "móvil y <b>reenvíamelas con el pie <code>/cookies</code></b> (mejor cifradas).")
+                cookies = self.yt_cookies_path()
+                guest = cookies and "LOGIN_INFO" not in Path(cookies).read_text(errors="replace")
+                if guest:
+                    msg = ("🔒 Las cookies guardadas son de <b>invitado</b> y YouTube exige una <b>cuenta "
+                           "iniciada</b>. Lanza <code>/ytlogin</code>, <b>inicia sesión</b> en YouTube con una "
+                           "cuenta (desechable) y cierra; entonces podré descargar.")
+                elif cookies or self.cfg.yt_cookies_browser:
+                    msg = ("🔒 Las cookies de YouTube han caducado o ya no sirven. Vuelve a iniciar sesión con "
+                           "<code>/ytlogin</code>, o reenvíame un <code>cookies.txt</code> con el pie "
+                           "<code>/cookies</code> (mejor cifrado).")
                 else:
                     msg = ("🔒 YouTube pide cookies de una sesión iniciada. Exporta un <code>cookies.txt</code> en "
                            "el móvil (Firefox/Kiwi, extensión «Get cookies.txt LOCALLY») y mándamelo con el pie "
