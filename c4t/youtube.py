@@ -2,9 +2,14 @@
 (Whisper) y Claude (suscripción) hace el resumen. La descarga necesita cookies de una sesión iniciada
 (YouTube exige "Sign in to confirm you're not a bot"); se configuran en el equipo, nunca por Telegram."""
 import asyncio
+import json
+import os
 import re
 import shutil
+import time
 from pathlib import Path
+
+from .inbox import inbox_dir, stamped
 
 URL_RE = re.compile(r"https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?[^\s]*v=|shorts/|live/)|youtu\.be/)[\w\-]+[^\s]*")
 SIGN_IN = ("sign in to confirm", "confirm you’re not a bot", "confirm you're not a bot", "cookies")
@@ -25,21 +30,37 @@ class SignInRequired(RuntimeError):
     """yt-dlp pide cookies de una sesión iniciada."""
 
 
+def archive_transcript(root: str, url: str, title: str, transcript: str) -> Path:
+    """Deja la transcripción en <root>/.c4t/inbox/youtube/ para que el proyecto la procese.
+
+    Se escribe a un temporal y se renombra: quien lea *.json nunca verá un archivo a medias.
+    """
+    folder = inbox_dir(root) / "youtube"
+    folder.mkdir(exist_ok=True)
+    dest = stamped(folder, f"{title[:80]}.json")
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(json.dumps({
+        "url": url, "title": title, "transcript": transcript,
+        "received_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }, ensure_ascii=False))
+    os.replace(tmp, dest)
+    return dest
+
+
 def js_runtime() -> list[str]:
     """yt-dlp necesita un runtime JS soportado (deno) para los retos de YouTube; node 20 no le vale."""
     deno = shutil.which("deno") or (lambda p: str(p) if p.exists() else None)(Path.home() / ".local" / "bin" / "deno")
     return ["--js-runtimes", f"deno:{deno}"] if deno else []
 
 
-async def download_audio(url: str, dest_dir: Path, cookies: str = "", cookies_browser: str = "",
-                         max_minutes: int = 0, proxy: str = "") -> tuple[Path, str]:
-    """Descarga el audio del vídeo a dest_dir y devuelve (ruta, título). Lanza SignInRequired/RuntimeError."""
+async def _ytdlp(url: str, dest_dir: Path, fmt_args: list[str], cookies: str, cookies_browser: str,
+                 max_minutes: int, proxy: str) -> tuple[Path, str]:
+    """Ejecuta yt-dlp con cookies/proxy/JS comunes y devuelve (fichero, título)."""
     binary = yt_dlp_bin()
     if not binary:
         raise RuntimeError("yt-dlp no está instalado")
     out = str(dest_dir / "%(title).150B [%(id)s].%(ext)s")
-    cmd = [binary, "-x", "--audio-format", "mp3", "--audio-quality", "5", "--no-playlist",
-           "--no-progress", "-o", out]
+    cmd = [binary, *fmt_args, "--no-playlist", "--no-progress", "-o", out]
     if max_minutes:
         cmd += ["--match-filter", f"duration<={max_minutes * 60}"]
     if cookies:
@@ -58,13 +79,28 @@ async def download_audio(url: str, dest_dir: Path, cookies: str = "", cookies_br
         proc.kill()
         raise RuntimeError("la descarga tardó demasiado") from None
     log = out_bytes.decode(errors="replace")
-    files = sorted(p for p in dest_dir.iterdir() if p.is_file())
+    files = sorted(p for p in dest_dir.iterdir() if p.is_file() and not p.name.endswith((".part", ".ytdl")))
     if proc.returncode != 0 or not files:
         if any(s in log.lower() for s in SIGN_IN):
             raise SignInRequired(log.strip()[-300:])
         if max_minutes and "does not pass filter" in log.lower():
             raise RuntimeError(f"el vídeo dura más de {max_minutes} min")
-        raise RuntimeError(log.strip()[-300:] or "no se pudo descargar el audio")
-    audio = files[0]
-    title = re.sub(r"\s*\[[\w\-]+\]$", "", audio.stem).strip() or audio.stem
-    return audio, title
+        raise RuntimeError(log.strip()[-300:] or "no se pudo descargar")
+    media = max(files, key=lambda f: f.stat().st_size)
+    title = re.sub(r"\s*\[[\w\-]+\]$", "", media.stem).strip() or media.stem
+    return media, title
+
+
+async def download_audio(url: str, dest_dir: Path, cookies: str = "", cookies_browser: str = "",
+                         max_minutes: int = 0, proxy: str = "") -> tuple[Path, str]:
+    """Descarga el audio del vídeo a dest_dir y devuelve (ruta, título). Lanza SignInRequired/RuntimeError."""
+    return await _ytdlp(url, dest_dir, ["-x", "--audio-format", "mp3", "--audio-quality", "5"],
+                        cookies, cookies_browser, max_minutes, proxy)
+
+
+async def download_video(url: str, dest_dir: Path, cookies: str = "", cookies_browser: str = "",
+                         max_minutes: int = 0, proxy: str = "", max_height: int = 480) -> tuple[Path, str]:
+    """Descarga el vídeo (con audio, ≤max_height: basta para leer gráficas) y devuelve (ruta, título)."""
+    fmt = f"bv*[height<={max_height}]+ba/b[height<={max_height}]/b"
+    return await _ytdlp(url, dest_dir, ["-f", fmt, "--merge-output-format", "mp4"],
+                        cookies, cookies_browser, max_minutes, proxy)

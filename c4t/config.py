@@ -59,6 +59,10 @@ class Config:
     yt_cookies_browser: str = ""    # alternativa: navegador del equipo con sesión (p. ej. "chromium", "firefox")
     yt_max_minutes: int = 120       # vídeos más largos se rechazan (0 = sin límite)
     yt_interface: str = ""          # interfaz de salida para YouTube (p. ej. la doméstica con VPN activa)
+    yt_frames: int = 24             # fotogramas del vídeo que ve Claude (gráficas); 0 = solo audio
+    yt_fps: float = 1.0             # muestreo antes de quitar repetidos
+    yt_model: str = "sonnet"        # modelo para el análisis de vídeos (con imágenes conviene uno bueno)
+    yt_archive: dict[str, str] = field(default_factory=dict)  # proyecto -> carpeta donde guardar transcripciones
     # /ytlogin: navegador efímero (noVNC + cloudflared quick tunnel) para iniciar sesión en YouTube.
     yt_login_seconds: int = 300     # cuánto se expone el navegador (siempre temporal)
     yt_browser_profile: str = "~/.config/claude4telegram/yt-browser"  # perfil persistente de ese navegador
@@ -66,6 +70,13 @@ class Config:
     @property
     def configured(self) -> bool:
         return self.chat_id is not None and bool(self.owner_ids)
+
+
+def parse_yt_archive(raw: str) -> dict[str, str]:
+    """"Proyecto=/ruta;Otro=/ruta" -> {proyecto: ruta}. Las entradas incompletas se ignoran."""
+    pairs = (item.partition("=") for item in raw.split(";"))
+    return {name.strip(): str(Path(path.strip()).expanduser()) for name, _, path in pairs
+            if name.strip() and path.strip()}
 
 
 def load_config() -> Config:
@@ -101,6 +112,10 @@ def load_config() -> Config:
         yt_cookies_browser=env.get("C4T_YT_COOKIES_BROWSER", ""),
         yt_max_minutes=int(env.get("C4T_YT_MAX_MINUTES", "120")),
         yt_interface=env.get("C4T_YT_INTERFACE", ""),
+        yt_frames=int(env.get("C4T_YT_FRAMES", "24")),
+        yt_fps=float(env.get("C4T_YT_FPS", "1")),
+        yt_model=env.get("C4T_YT_MODEL", "sonnet"),
+        yt_archive=parse_yt_archive(env.get("C4T_YT_ARCHIVE", "")),
         yt_login_seconds=int(env.get("C4T_YT_LOGIN_SECONDS", "300")),
         yt_browser_profile=env.get("C4T_YT_PROFILE", "~/.config/claude4telegram/yt-browser"),
     )

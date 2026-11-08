@@ -116,3 +116,45 @@ async def ask_claude(instructions: str, content: str, model: str = "", binary: s
     if proc.returncode != 0 or not out.strip():
         raise RuntimeError((err or out).decode(errors="replace").strip()[-300:] or f"código {proc.returncode}")
     return out.decode(errors="replace").strip()
+
+
+async def ask_claude_images(instructions: str, blocks: list[tuple[str, object]], model: str = "",
+                            binary: str = "", timeout: int = 900) -> str:
+    """Como ask_claude pero con imágenes: `blocks` es [("text", str) | ("image", Path jpg)] en orden.
+
+    Va por stream-json, que permite bloques de imagen en el mensaje. Sin herramientas y en el home."""
+    import base64
+    import json as _json
+    b = claude_bin(binary)
+    if not b:
+        raise RuntimeError("no encuentro el comando claude (define C4T_CLAUDE_BIN en .env)")
+    content = [{"type": "text", "text": instructions}]
+    for kind, value in blocks:
+        if kind == "image":
+            data = base64.b64encode(Path(value).read_bytes()).decode()
+            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}})
+        else:
+            content.append({"type": "text", "text": str(value)})
+    message = _json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n"
+    cmd = [b, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+           "--tools", "", "--no-session-persistence"]
+    if model:
+        cmd += ["--model", model]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=str(Path.home()), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE, env={**os.environ, "C4T_DISABLE": "1"})
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(message.encode()), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"Claude no respondió en {timeout} s") from None
+    for line in out.decode(errors="replace").splitlines():
+        try:
+            event = _json.loads(line)
+        except ValueError:
+            continue
+        if event.get("type") == "result":
+            if event.get("is_error") or not event.get("result"):
+                raise RuntimeError(str(event.get("result") or event.get("subtype") or "error de Claude")[-300:])
+            return event["result"].strip()
+    raise RuntimeError((err or out).decode(errors="replace").strip()[-300:] or f"código {proc.returncode}")

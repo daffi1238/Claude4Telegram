@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from c4t import voice
-from c4t import youtube
+from c4t import videoframes, youtube
 from c4t.config import load_config
 from c4t.media import guess_kind
 from c4t.inbox import safe_name, git_root
@@ -50,6 +50,23 @@ class YouTube(unittest.TestCase):
         self.assertTrue(youtube.find_url("https://www.youtube.com/watch?v=abc123DEF_g"))
         self.assertTrue(youtube.find_url("https://www.youtube.com/shorts/aQ_bQ12cdef"))
 
+    def test_archiva_transcripcion(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            path = youtube.archive_transcript(root, "https://youtu.be/XY12zAB-9qQ", "A/B: ¿bolsa?", "hola")
+            self.assertEqual(path.parent, Path(root) / ".c4t" / "inbox" / "youtube")
+            self.assertEqual(path.suffix, ".json")
+            data = json.loads(path.read_text())
+            self.assertEqual((data["title"], data["transcript"]), ("A/B: ¿bolsa?", "hola"))
+            self.assertEqual([p.suffix for p in path.parent.iterdir()], [".json"])
+
+    def test_mapeo_de_archivo(self):
+        from c4t.config import parse_yt_archive
+        self.assertEqual(parse_yt_archive("Investments=/a/b; Otro=/c;;roto;=/x"),
+                         {"Investments": "/a/b", "Otro": "/c"})
+        self.assertEqual(parse_yt_archive(""), {})
+
     def test_ignora(self):
         self.assertIsNone(youtube.find_url("sin enlaces"))
         self.assertIsNone(youtube.find_url("https://vimeo.com/123"))
@@ -58,6 +75,13 @@ class YouTube(unittest.TestCase):
         import re
         stem = "Mi vídeo sobre bolsa [dQw4w9WgXcQ]"
         self.assertEqual(re.sub(r"\s*\[[\w\-]+\]$", "", stem).strip(), "Mi vídeo sobre bolsa")
+
+
+class VideoFrames(unittest.TestCase):
+    def test_mmss(self):
+        self.assertEqual(videoframes.mmss(0), "00:00")
+        self.assertEqual(videoframes.mmss(135.7), "02:15")
+        self.assertEqual(videoframes.mmss(3725), "1:02:05")
 
 
 class GuessKind(unittest.TestCase):

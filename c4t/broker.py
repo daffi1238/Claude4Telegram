@@ -25,7 +25,7 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (BotCommand, BufferedInputFile, CallbackQuery,
-                           InlineKeyboardButton, InlineKeyboardMarkup, Message,
+                           InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Message,
                            ReactionTypeEmoji)
 from aiohttp import web
 
@@ -39,8 +39,8 @@ from .state import State
 from .hub import Hub, HISTORY_MESSAGES
 from . import voice
 from .summary import ago, md_bold, render_line, render_summary, transcript_of
-from .ai_summary import ask_claude, summarize
-from . import netbind, youtube
+from .ai_summary import ask_claude, ask_claude_images, summarize
+from . import netbind, videoframes, youtube
 
 log = logging.getLogger("c4t")
 
@@ -65,6 +65,15 @@ VOICE_SUMMARY_SYSTEM = (
 VOICE_SUMMARY_INPUT = 6000   # caracteres de la respuesta que se mandan a resumir (contexto acotado del hub)
 CHAT_MSGS_CAP = 200          # respuestas de /chat recordadas para continuar al responderlas
 OFFERED_CAP = 50             # textos sueltos ofrecidos como instrucción con un botón
+YT_CHUNK_SECONDS = 60         # tramos de audio para tener marcas de tiempo
+YT_FRAMES_NOTE = (
+    "\nAdemás de la transcripción (con marcas [mm:ss]) recibes fotogramas del vídeo, cada uno con su minuto. "
+    "Úsalos para comprobar las afirmaciones que dependen de lo que se ve: describe qué muestra realmente cada "
+    "gráfica relevante (qué es, ejes, periodo, valores o tendencia) y di si respalda, matiza o contradice lo "
+    "que dice el narrador, citando el minuto. Si una afirmación depende de una gráfica que no aparece en los "
+    "fotogramas, dilo. Ignora los fotogramas irrelevantes (presentador, intro, rótulos). Incluye esa "
+    "verificación en «🔎 Mi opinión». En la ÚLTIMA línea escribe exactamente «FOTOGRAMAS_CLAVE: » seguido de "
+    "los números (máx. 4, separados por comas) de los fotogramas más útiles para el usuario, o «ninguno».")
 YT_TRANSCRIPT_CAP = 120000   # caracteres de la transcripción que se mandan a Claude
 YT_DIGEST_SYSTEM = (
     "Eres un analista que resume en español la transcripción de un vídeo de YouTube para alguien que no "
@@ -1012,66 +1021,133 @@ class Broker:
             log.info("YouTube sale por %s (%s)", self.cfg.yt_interface, self.yt_proxy)
         return self.yt_proxy
 
+    def archive_youtube(self, thread_id: int | None, url: str, title: str, transcript: str) -> str:
+        """Guarda la transcripción si el tema tiene archivo configurado; devuelve la línea para el usuario."""
+        project = self.project_of_thread(thread_id)
+        root = self.cfg.yt_archive.get(project or "")
+        if not root:
+            return ""
+        try:
+            youtube.archive_transcript(root, url, title, transcript)
+        except Exception as e:
+            log.warning("archivar transcripción de YouTube: %s", e)
+            return f"⚠️ No pude guardar la transcripción en {esc(project)}: {esc(clip(str(e), 200))}\n"
+        return f"📥 Transcripción guardada en {esc(project)}\n"
+
+    def youtube_signin_message(self) -> str:
+        """Qué decirle al usuario cuando YouTube pide verificación, según lo que ya tengamos configurado."""
+        cookies = self.yt_cookies_path()
+        guest = cookies and "LOGIN_INFO" not in Path(cookies).read_text(errors="replace")
+        if guest:
+            msg = ("🔒 Las cookies guardadas son de <b>invitado</b> y YouTube exige una <b>cuenta "
+                   "iniciada</b>. Lanza <code>/ytlogin</code>, <b>inicia sesión</b> en YouTube con una "
+                   "cuenta (desechable) y cierra; entonces podré descargar.")
+        elif cookies or self.cfg.yt_cookies_browser:
+            msg = ("🔒 Las cookies de YouTube han caducado o ya no sirven. Vuelve a iniciar sesión con "
+                   "<code>/ytlogin</code>, o reenvíame un <code>cookies.txt</code> con el pie "
+                   "<code>/cookies</code> (mejor cifrado).")
+        else:
+            msg = ("🔒 YouTube pide cookies de una sesión iniciada. Exporta un <code>cookies.txt</code> en "
+                   "el móvil (Firefox/Kiwi, extensión «Get cookies.txt LOCALLY») y mándamelo con el pie "
+                   "<code>/cookies</code>; o pon <code>C4T_YT_COOKIES_BROWSER</code> en el equipo. "
+                   "Mándalo cifrado (.7z/.gpg) y la contraseña nunca pasa por Telegram.")
+        if not self.cfg.yt_interface:
+            msg += ("\n\nSi el equipo usa VPN, YouTube suele bloquear su IP: pon "
+                    "<code>C4T_YT_INTERFACE=&lt;interfaz doméstica&gt;</code> en el .env y las descargas "
+                    "saldrán por tu red de casa sin apagar la VPN (sin login).")
+        return msg
+
+    async def transcribe_timed(self, audio: Path, work: Path) -> str:
+        """Transcripción con marcas [mm:ss]: el hub no da segmentos, así que se trocea el audio."""
+        parts = await videoframes.split_audio(audio, work / "tramos", YT_CHUNK_SECONDS)
+        lines = []
+        for part, start in parts:
+            text = await self.hub.transcribe(part.read_bytes(), part.name, autodetect=True)
+            if text:
+                lines.append(f"[{videoframes.mmss(start)}] {text}")
+        return "\n".join(lines)
+
     async def handle_youtube(self, m: Message, url: str) -> None:
-        """Enlace de YouTube → audio (yt-dlp) → transcripción (hub) → resumen temático (Claude suscripción)."""
+        """Enlace de YouTube → vídeo/audio (yt-dlp) → transcripción con tiempos (hub) + fotogramas →
+        resumen temático de Claude que comprueba las gráficas contra lo que se dice."""
         if not self.hub.enabled:
             await m.reply("No tengo acceso al modelo local de Whisper para transcribir (hub sin configurar).")
             return
-        note = await m.reply("🎬 Descargando el audio de YouTube…")
+        want_frames = self.cfg.yt_frames > 0
+        note = await m.reply("🎬 Descargando el vídeo de YouTube…" if want_frames else
+                             "🎬 Descargando el audio de YouTube…")
+        dl = dict(cookies=self.yt_cookies_path(), cookies_browser=self.yt_cookies_browser(),
+                  max_minutes=self.cfg.yt_max_minutes, proxy=await self.youtube_proxy())
         with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            frames: list[tuple[Path, float]] = []
             try:
-                audio, title = await youtube.download_audio(
-                    url, Path(tmp), self.yt_cookies_path(), self.yt_cookies_browser(), self.cfg.yt_max_minutes,
-                    await self.youtube_proxy())
-            except youtube.SignInRequired:
-                cookies = self.yt_cookies_path()
-                guest = cookies and "LOGIN_INFO" not in Path(cookies).read_text(errors="replace")
-                if guest:
-                    msg = ("🔒 Las cookies guardadas son de <b>invitado</b> y YouTube exige una <b>cuenta "
-                           "iniciada</b>. Lanza <code>/ytlogin</code>, <b>inicia sesión</b> en YouTube con una "
-                           "cuenta (desechable) y cierra; entonces podré descargar.")
-                elif cookies or self.cfg.yt_cookies_browser:
-                    msg = ("🔒 Las cookies de YouTube han caducado o ya no sirven. Vuelve a iniciar sesión con "
-                           "<code>/ytlogin</code>, o reenvíame un <code>cookies.txt</code> con el pie "
-                           "<code>/cookies</code> (mejor cifrado).")
+                if want_frames:
+                    try:
+                        video, title = await youtube.download_video(url, work / "dl", **dl)
+                        audio = await videoframes.extract_audio(video, work / "audio.mp3")
+                        frames = await videoframes.extract_frames(video, work / "frames", self.cfg.yt_fps,
+                                                                  self.cfg.yt_frames)
+                    except youtube.SignInRequired:
+                        raise
+                    except Exception as e:   # sin vídeo, al menos el audio
+                        log.warning("vídeo de YouTube, sigo solo con audio: %s", e)
+                        audio, title = await youtube.download_audio(url, work / "dl_audio", **dl)
                 else:
-                    msg = ("🔒 YouTube pide cookies de una sesión iniciada. Exporta un <code>cookies.txt</code> en "
-                           "el móvil (Firefox/Kiwi, extensión «Get cookies.txt LOCALLY») y mándamelo con el pie "
-                           "<code>/cookies</code>; o pon <code>C4T_YT_COOKIES_BROWSER</code> en el equipo. "
-                           "Mándalo cifrado (.7z/.gpg) y la contraseña nunca pasa por Telegram.")
-                if not self.cfg.yt_interface:
-                    msg += ("\n\nSi el equipo usa VPN, YouTube suele bloquear su IP: pon "
-                            "<code>C4T_YT_INTERFACE=&lt;interfaz doméstica&gt;</code> en el .env y las descargas "
-                            "saldrán por tu red de casa sin apagar la VPN (sin login).")
-                await self.edit_or_reply(note, m, msg)
+                    audio, title = await youtube.download_audio(url, work / "dl", **dl)
+            except youtube.SignInRequired:
+                await self.edit_or_reply(note, m, self.youtube_signin_message())
                 return
             except Exception as e:
-                await self.edit_or_reply(note, m, f"⚠️ No pude descargar el audio: {esc(clip(str(e), 300))}")
+                await self.edit_or_reply(note, m, f"⚠️ No pude descargar el vídeo: {esc(clip(str(e), 300))}")
                 return
             await self.edit_or_reply(note, m, f"🎧 Transcribiendo «{esc(clip(title, 120))}»…")
             try:
-                transcript = await self.hub.transcribe(audio.read_bytes(), audio.name, autodetect=True)
+                transcript = await self.transcribe_timed(audio, work)
             except Exception as e:
                 await self.edit_or_reply(note, m, f"⚠️ No pude transcribir: {esc(clip(str(e), 300))}")
                 return
-        if not transcript:
-            await self.edit_or_reply(note, m, "⚠️ La transcripción salió vacía.")
-            return
-        await self.edit_or_reply(note, m, f"🧠 Resumiendo «{esc(clip(title, 120))}»…")
-        try:
+            if not transcript:
+                await self.edit_or_reply(note, m, "⚠️ La transcripción salió vacía.")
+                return
+            archive_line = self.archive_youtube(m.message_thread_id, url, title, transcript)
+            seen = f" con {len(frames)} fotogramas" if frames else ""
+            await self.edit_or_reply(note, m, f"🧠 Analizando «{esc(clip(title, 120))}»{seen}…")
             content = f"Título del vídeo: {title}\nURL: {url}\n\nTranscripción:\n{transcript[:YT_TRANSCRIPT_CAP]}"
-            summary = await ask_claude(YT_DIGEST_SYSTEM, content, self.cfg.summary_model, self.cfg.claude_bin)
-        except Exception as e:
-            await self.edit_or_reply(note, m, f"⚠️ No pude resumir: {esc(clip(str(e), 300))}")
-            return
-        head = f"🎬 <b>{esc(clip(title, 200))}</b>\n\n"
-        full = head + md_bold(esc(summary))
-        if len(full) <= 3900:
-            await self.edit_or_reply(note, m, full)
-        else:
-            await self.edit_or_reply(note, m, head + "📄 Resumen completo en el archivo adjunto.")
-            await send_media(self.bot, self.cfg.chat_id, m.message_thread_id, "resumen.md",
-                             f"# {title}\n\n{summary}".encode(), f"🎬 {esc(clip(title, 200))}", "document")
+            try:
+                if frames:
+                    blocks: list[tuple[str, object]] = [("text", content)]
+                    for i, (path, t) in enumerate(frames, 1):
+                        blocks += [("text", f"Fotograma {i} — {videoframes.mmss(t)}"), ("image", path)]
+                    summary = await ask_claude_images(YT_DIGEST_SYSTEM + YT_FRAMES_NOTE, blocks,
+                                                      self.cfg.yt_model, self.cfg.claude_bin)
+                else:
+                    summary = await ask_claude(YT_DIGEST_SYSTEM, content, self.cfg.yt_model, self.cfg.claude_bin)
+            except Exception as e:
+                await self.edit_or_reply(note, m, f"⚠️ No pude resumir: {esc(clip(str(e), 300))}")
+                return
+            key = []
+            mark = re.search(r"^\s*FOTOGRAMAS_CLAVE:\s*(.*)$", summary, re.MULTILINE)
+            if mark:
+                summary = (summary[:mark.start()] + summary[mark.end():]).strip()
+                key = [int(n) for n in re.findall(r"\d+", mark.group(1)) if 1 <= int(n) <= len(frames)][:4]
+            head = f"🎬 <b>{esc(clip(title, 200))}</b>\n{archive_line}\n"
+            full = head + md_bold(esc(summary))
+            if len(full) <= 3900:
+                await self.edit_or_reply(note, m, full)
+            else:
+                await self.edit_or_reply(note, m, head + "📄 Resumen completo en el archivo adjunto.")
+                await send_media(self.bot, self.cfg.chat_id, m.message_thread_id, "resumen.md",
+                                 f"# {title}\n\n{summary}".encode(), f"🎬 {esc(clip(title, 200))}", "document")
+            if key:   # que el usuario vea también las gráficas en las que se apoya el análisis
+                when = ", ".join(videoframes.mmss(frames[n - 1][1]) for n in key)
+                album = [InputMediaPhoto(media=BufferedInputFile(frames[n - 1][0].read_bytes(), f"f{n}.jpg"),
+                                         caption=f"🖼 Fotogramas clave: {when}" if j == 0 else None)
+                         for j, n in enumerate(key)]
+                try:
+                    await self.bot.send_media_group(self.cfg.chat_id, album, message_thread_id=m.message_thread_id)
+                except TelegramBadRequest as e:
+                    log.warning("no pude enviar los fotogramas: %s", e)
 
     async def compact_reply(self, message: str) -> str:
         """Resumen de la respuesta de Claude a ≤1500 car. para texto + audio; si falla, el texto a secas."""
