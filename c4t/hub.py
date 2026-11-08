@@ -51,10 +51,12 @@ class Hub:
             "model": model or self.chat_model, "messages": messages, "max_tokens": max_tokens})
         return (data["choices"][0]["message"]["content"] or "").strip()
 
-    async def transcribe(self, audio: bytes, filename: str, lang: str | None = None) -> str:
+    async def transcribe(self, audio: bytes, filename: str, lang: str | None = None,
+                         autodetect: bool = False) -> str:
         form = aiohttp.FormData()
         form.add_field("file", audio, filename=filename, content_type="application/octet-stream")
-        form.add_field("language", lang or self.lang)
+        if not autodetect:   # sin "language" el hub detecta el idioma (vídeos en inglés, etc.)
+            form.add_field("language", lang or self.lang)
         data = await self._post("/v1/audio/transcriptions", MEDIA_TIMEOUT, data=form)
         return (data.get("text") or "").strip()
 

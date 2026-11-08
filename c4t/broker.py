@@ -40,7 +40,7 @@ from .hub import Hub, HISTORY_MESSAGES
 from . import voice
 from .summary import ago, md_bold, render_line, render_summary, transcript_of
 from .ai_summary import ask_claude, summarize
-from . import youtube
+from . import netbind, youtube
 
 log = logging.getLogger("c4t")
 
@@ -134,6 +134,8 @@ class Broker:
         self.offered: dict[str, tuple[int, str]] = {}  # token -> (thread_id, texto) ofrecido como instrucción
         self.ytlogin_proc: asyncio.subprocess.Process | None = None  # navegador efímero de /ytlogin en curso
         self.ytlogin_pgid: int | None = None                         # su grupo de procesos (para matarlo entero)
+        self.yt_proxy: str = ""                                        # proxy SOCKS local por la red doméstica
+        self.yt_proxy_server: asyncio.AbstractServer | None = None
         self.ytlogin_marks: list[str] | None = None                  # [port, vnc, display, profile] para matar por marcador
 
     # ------------------------------------------------------------------ Telegram helpers
@@ -1003,6 +1005,13 @@ class Broker:
                       "⚠️ Un cookies.txt da acceso a tu sesión de Google: mándalo cifrado y no lo compartas. "
                       "Si caduca, reenvíamelo.")
 
+    async def youtube_proxy(self) -> str:
+        """Proxy local que saca las descargas por C4T_YT_INTERFACE (se arranca la primera vez)."""
+        if self.cfg.yt_interface and not self.yt_proxy:
+            self.yt_proxy_server, self.yt_proxy = await netbind.start(self.cfg.yt_interface)
+            log.info("YouTube sale por %s (%s)", self.cfg.yt_interface, self.yt_proxy)
+        return self.yt_proxy
+
     async def handle_youtube(self, m: Message, url: str) -> None:
         """Enlace de YouTube → audio (yt-dlp) → transcripción (hub) → resumen temático (Claude suscripción)."""
         if not self.hub.enabled:
@@ -1012,7 +1021,8 @@ class Broker:
         with tempfile.TemporaryDirectory() as tmp:
             try:
                 audio, title = await youtube.download_audio(
-                    url, Path(tmp), self.yt_cookies_path(), self.yt_cookies_browser(), self.cfg.yt_max_minutes)
+                    url, Path(tmp), self.yt_cookies_path(), self.yt_cookies_browser(), self.cfg.yt_max_minutes,
+                    await self.youtube_proxy())
             except youtube.SignInRequired:
                 cookies = self.yt_cookies_path()
                 guest = cookies and "LOGIN_INFO" not in Path(cookies).read_text(errors="replace")
@@ -1029,6 +1039,10 @@ class Broker:
                            "el móvil (Firefox/Kiwi, extensión «Get cookies.txt LOCALLY») y mándamelo con el pie "
                            "<code>/cookies</code>; o pon <code>C4T_YT_COOKIES_BROWSER</code> en el equipo. "
                            "Mándalo cifrado (.7z/.gpg) y la contraseña nunca pasa por Telegram.")
+                if not self.cfg.yt_interface:
+                    msg += ("\n\nSi el equipo usa VPN, YouTube suele bloquear su IP: pon "
+                            "<code>C4T_YT_INTERFACE=&lt;interfaz doméstica&gt;</code> en el .env y las descargas "
+                            "saldrán por tu red de casa sin apagar la VPN (sin login).")
                 await self.edit_or_reply(note, m, msg)
                 return
             except Exception as e:
@@ -1036,7 +1050,7 @@ class Broker:
                 return
             await self.edit_or_reply(note, m, f"🎧 Transcribiendo «{esc(clip(title, 120))}»…")
             try:
-                transcript = await self.hub.transcribe(audio.read_bytes(), audio.name)
+                transcript = await self.hub.transcribe(audio.read_bytes(), audio.name, autodetect=True)
             except Exception as e:
                 await self.edit_or_reply(note, m, f"⚠️ No pude transcribir: {esc(clip(str(e), 300))}")
                 return

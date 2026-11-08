@@ -25,8 +25,14 @@ class SignInRequired(RuntimeError):
     """yt-dlp pide cookies de una sesión iniciada."""
 
 
+def js_runtime() -> list[str]:
+    """yt-dlp necesita un runtime JS soportado (deno) para los retos de YouTube; node 20 no le vale."""
+    deno = shutil.which("deno") or (lambda p: str(p) if p.exists() else None)(Path.home() / ".local" / "bin" / "deno")
+    return ["--js-runtimes", f"deno:{deno}"] if deno else []
+
+
 async def download_audio(url: str, dest_dir: Path, cookies: str = "", cookies_browser: str = "",
-                         max_minutes: int = 0) -> tuple[Path, str]:
+                         max_minutes: int = 0, proxy: str = "") -> tuple[Path, str]:
     """Descarga el audio del vídeo a dest_dir y devuelve (ruta, título). Lanza SignInRequired/RuntimeError."""
     binary = yt_dlp_bin()
     if not binary:
@@ -40,8 +46,9 @@ async def download_audio(url: str, dest_dir: Path, cookies: str = "", cookies_br
         cmd += ["--cookies", cookies]
     elif cookies_browser:
         cmd += ["--cookies-from-browser", cookies_browser]
-    if shutil.which("node"):
-        cmd += ["--js-runtimes", "node"]   # YouTube necesita un runtime JS; deno por defecto, node si lo hay
+    cmd += js_runtime()
+    if proxy:   # salir por la red doméstica en vez de la VPN (YouTube bloquea IPs de VPN)
+        cmd += ["--proxy", proxy, "--force-ipv4"]
     cmd.append(url)
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)

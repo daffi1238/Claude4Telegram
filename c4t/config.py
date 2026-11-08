@@ -58,6 +58,7 @@ class Config:
     yt_cookies: str = ""            # ruta a un cookies.txt (Netscape) exportado de YouTube
     yt_cookies_browser: str = ""    # alternativa: navegador del equipo con sesión (p. ej. "chromium", "firefox")
     yt_max_minutes: int = 120       # vídeos más largos se rechazan (0 = sin límite)
+    yt_interface: str = ""          # interfaz de salida para YouTube (p. ej. la doméstica con VPN activa)
     # /ytlogin: navegador efímero (noVNC + cloudflared quick tunnel) para iniciar sesión en YouTube.
     yt_login_seconds: int = 300     # cuánto se expone el navegador (siempre temporal)
     yt_browser_profile: str = "~/.config/claude4telegram/yt-browser"  # perfil persistente de ese navegador
@@ -99,6 +100,7 @@ def load_config() -> Config:
         yt_cookies=env.get("C4T_YT_COOKIES", ""),
         yt_cookies_browser=env.get("C4T_YT_COOKIES_BROWSER", ""),
         yt_max_minutes=int(env.get("C4T_YT_MAX_MINUTES", "120")),
+        yt_interface=env.get("C4T_YT_INTERFACE", ""),
         yt_login_seconds=int(env.get("C4T_YT_LOGIN_SECONDS", "300")),
         yt_browser_profile=env.get("C4T_YT_PROFILE", "~/.config/claude4telegram/yt-browser"),
     )

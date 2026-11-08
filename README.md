@@ -151,7 +151,11 @@ Pega un **enlace de YouTube** en cualquier tema y el bot descarga el audio (yt-d
 
 Funciona en todos los temas sin tocar nada en los proyectos. Sin hub configurado, el bot avisa de que no tiene Whisper local.
 
-**Cookies (la descarga las necesita).** YouTube pide "Sign in to confirm you're not a bot", así que yt-dlp necesita las cookies de una sesión iniciada. Tres formas:
+**Si el equipo usa VPN (lo más habitual del bloqueo).** YouTube marca las IPs de VPN compartidas y responde "Sign in to confirm you're not a bot". Pon `C4T_YT_INTERFACE=<interfaz doméstica>` (p. ej. `enp5s0`; la ves con `ip -br addr`): el broker levanta un proxy SOCKS **solo en 127.0.0.1** que saca **únicamente las descargas de YouTube** por tu red de casa, sin apagar la VPN ni tocar el resto del tráfico, y sin root. Con tu IP doméstica normalmente **no hacen falta cookies ni login**.
+
+yt-dlp necesita además un runtime JS soportado: [deno](https://deno.com) en el `PATH` o en `~/.local/bin` (node 20 no le vale).
+
+**Cookies (si aun así lo pide).** Si YouTube sigue pidiendo verificación, yt-dlp necesita las cookies de una sesión iniciada. Formas:
 
 1. **`/ytlogin` (lo más cómodo, todo desde el móvil):** el bot abre un **navegador temporal en el equipo** y te manda un enlace (noVNC a través de un túnel efímero de Cloudflare, abierto solo unos minutos). Lo abres desde el móvil, inicias sesión en YouTube tú mismo (sin detección de bot) y la sesión queda guardada en el equipo para las descargas. La exposición es **siempre temporal** (`C4T_YT_LOGIN_SECONDS`, 5 min por defecto) y hay un botón para cerrarla antes. Necesita `Xvfb`, `chromium`, `x11vnc`, `websockify`, `cloudflared` y los ficheros de [noVNC](https://github.com/novnc/noVNC) en `~/.local/share/novnc`.
 2. **Navegador del equipo:** inicia sesión en YouTube en un navegador del equipo y pon `C4T_YT_COOKIES_BROWSER=chromium`.
@@ -248,6 +252,7 @@ Hace una copia de seguridad de `~/.claude/settings.json` y solo añade sus propi
 | `C4T_HUB_KEY` | Bearer del hub (nunca se sube al repo) |
 | `C4T_CHAT_MODEL` | Modelo para `/chat` y para reparar transcripciones (por defecto `qwen-coder`) |
 | `C4T_TTS_VOICE` | Voz del hub para la respuesta hablada (por defecto `ef_dora`) |
+| `C4T_YT_INTERFACE` | Interfaz por la que salen las descargas de YouTube (p. ej. la doméstica con una VPN activa) |
 | `C4T_VOICE_SUMMARY` | Resumir con el hub la respuesta hablada a ≤1500 car. (por defecto `1`; `0` para leerla entera) |
 
 ## Varios equipos
