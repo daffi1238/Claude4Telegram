@@ -857,7 +857,8 @@ class Broker:
             return
         note = await m.reply("🖥 Abriendo navegador temporal y túnel… (unos segundos)")
         env = {**os.environ, "C4T_YT_LOGIN_SECONDS": str(self.cfg.yt_login_seconds),
-               "C4T_YT_PROFILE": str(Path(self.cfg.yt_browser_profile).expanduser())}
+               "C4T_YT_PROFILE": str(Path(self.cfg.yt_browser_profile).expanduser()),
+               "C4T_YT_COOKIES_OUT": str(self.cfg.state_dir / "yt-cookies.txt")}
         proc = await asyncio.create_subprocess_exec(
             "bash", str(script), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             env=env, start_new_session=True)   # grupo propio: así podemos matarlo entero
@@ -916,19 +917,12 @@ class Broker:
             return False
         pgid = self.ytlogin_pgid
 
-        def sig(s):
-            if pgid is not None:
-                try:
-                    os.killpg(pgid, s)
-                    return
-                except (ProcessLookupError, PermissionError):
-                    pass
-            try:
-                (proc.terminate if s == signal.SIGTERM else proc.kill)()
-            except ProcessLookupError:
-                pass
-
-        sig(signal.SIGTERM)
+        # SIGTERM SOLO a bash (no al grupo): su trap cierra el túnel ya y apaga chromium limpio para que
+        # vuelque las cookies. killpg a todo el grupo mataría los subprocesos de chromium y perdería la sesión.
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
 
         def marker_sweep(ksig: str):
             # Mata por marcadores únicos de ESTE stack: cubre a chromium/cloudflared que hacen setsid y
@@ -950,8 +944,18 @@ class Broker:
                     pass
 
         async def _sweep():
-            await asyncio.sleep(2)
-            sig(signal.SIGKILL)       # grupo
+            # Margen para que chromium vuelque a disco la sesión (login) tras el SIGTERM limpio de su trap;
+            # el túnel (cloudflared) ya lo cierra el trap enseguida, así que la exposición termina pronto.
+            await asyncio.sleep(10)
+            if pgid is not None:      # barrido final del grupo por si algo quedó colgado
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
             marker_sweep("KILL")      # y cualquier fugado por setsid
         asyncio.create_task(_sweep())
         return True

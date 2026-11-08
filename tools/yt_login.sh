@@ -21,17 +21,33 @@ done
 VNC_PORT=$((5900 + DISPLAY_NUM))
 # Puerto web libre para websockify/noVNC.
 PORT="${C4T_YT_VNC_WEB_PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
+# Puerto de DevTools (solo 127.0.0.1) para volcar las cookies en vivo al cerrar.
+DBG="$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+VENV_PY="$(cd "$HERE/.." && pwd)/.venv/bin/python"
+COOKIES_OUT="${C4T_YT_COOKIES_OUT:-$HOME/.local/state/claude4telegram/yt-cookies.txt}"
 
 CF_PID=""; WS_PID=""; X11VNC_PID=""; CHROME_PID=""; XVFB_PID=""
 cleanup() {
     trap - EXIT INT TERM
-    kill "$CF_PID" "$WS_PID" "$X11VNC_PID" "$CHROME_PID" "$XVFB_PID" 2>/dev/null
-    pkill -P $$ 2>/dev/null
-    # Barrido por marcadores ÚNICOS de ESTE stack (chromium y cloudflared hacen setsid y escapan del grupo).
-    [ -n "${PROFILE:-}" ]   && pkill -f "user-data-dir=$PROFILE" 2>/dev/null
-    [ -n "${PORT:-}" ]      && pkill -f "127.0.0.1:$PORT" 2>/dev/null
-    [ -n "${VNC_PORT:-}" ]  && pkill -f "rfbport $VNC_PORT" 2>/dev/null
+    # 1) Fuera el túnel y el VNC: la exposición acaba ya.
+    kill "$CF_PID" "$WS_PID" "$X11VNC_PID" 2>/dev/null
+    [ -n "${PORT:-}" ]     && pkill -f "127.0.0.1:$PORT" 2>/dev/null
+    [ -n "${VNC_PORT:-}" ] && pkill -f "rfbport $VNC_PORT" 2>/dev/null
+    # 2) Volcar las cookies EN VIVO vía DevTools antes de cerrar (no depende del guardado a disco de chromium).
+    if [ -n "${DBG:-}" ] && [ -x "$VENV_PY" ] && [ -f "$HERE/yt_cookies.py" ]; then
+        mkdir -p "$(dirname "$COOKIES_OUT")"
+        "$VENV_PY" "$HERE/yt_cookies.py" "$DBG" "$COOKIES_OUT" >/dev/null 2>&1 || true
+        chmod 600 "$COOKIES_OUT" 2>/dev/null
+    fi
+    # 3) SIGTERM al principal de chromium y margen para cerrar.
+    kill "$CHROME_PID" 2>/dev/null
+    sleep 2
+    # 3) Ahora sí, barrido duro de lo que quede (subprocesos de chromium ya cerrados o colgados) y el display.
+    [ -n "${PROFILE:-}" ]     && pkill -f "user-data-dir=$PROFILE" 2>/dev/null
+    kill "$XVFB_PID" 2>/dev/null
     [ -n "${DISPLAY_NUM:-}" ] && pkill -f "Xvfb :$DISPLAY_NUM " 2>/dev/null
+    pkill -P $$ 2>/dev/null
     rm -f "$CF_LOG"
 }
 trap 'cleanup; exit 0' EXIT INT TERM
@@ -47,6 +63,7 @@ for _ in $(seq 1 10); do [ -e "/tmp/.X11-unix/X$DISPLAY_NUM" ] && break; sleep 0
 [ -e "/tmp/.X11-unix/X$DISPLAY_NUM" ] || { echo "ERROR=Xvfb no arrancó en :$DISPLAY_NUM"; exit 5; }
 DISPLAY=":$DISPLAY_NUM" chromium --user-data-dir="$PROFILE" --no-first-run --no-default-browser-check \
     --disable-dev-shm-usage --no-sandbox --password-store=basic --start-maximized \
+    --remote-debugging-port="$DBG" --remote-allow-origins=* \
     "https://www.youtube.com" >/dev/null 2>&1 & CHROME_PID=$!
 # -rfbport fijo: si no, x11vnc escoge 5900 y websockify (que apunta a 5900+display) no lo encuentra.
 x11vnc -display ":$DISPLAY_NUM" -rfbport "$VNC_PORT" -localhost -nopw -forever -shared -quiet \
