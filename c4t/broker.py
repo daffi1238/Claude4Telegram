@@ -65,7 +65,15 @@ VOICE_SUMMARY_SYSTEM = (
 VOICE_SUMMARY_INPUT = 6000   # caracteres de la respuesta que se mandan a resumir (contexto acotado del hub)
 CHAT_MSGS_CAP = 200          # respuestas de /chat recordadas para continuar al responderlas
 OFFERED_CAP = 50             # textos sueltos ofrecidos como instrucción con un botón
-YT_CHUNK_SECONDS = 60         # tramos de audio para tener marcas de tiempo
+YT_CHUNK_SECONDS = 20         # tramos de audio: cada marca [mm:ss] tiene esta precisión
+YT_MAX_MOMENTS = 8            # momentos visuales que se revisan como mucho
+YT_MOMENTS_SYSTEM = (
+    "Lee la transcripción de un vídeo de YouTube; cada línea empieza con [mm:ss], el inicio de un tramo "
+    "de unos 20 s. Indica los tramos en que el "
+    "narrador se apoya en algo VISUAL que conviene ver para verificar lo que dice: gráficas, tablas, cifras "
+    "en pantalla, capturas, diapositivas («como veis aquí», «en este gráfico», «fijaos en…», niveles o "
+    "precios que señala). Responde SOLO con una línea por momento con el formato «mm:ss — motivo», como "
+    "mucho 8, de lo más importante a lo menos. Si no hay ninguno, responde exactamente «ninguno».")
 YT_FRAMES_NOTE = (
     "\nAdemás de la transcripción (con marcas [mm:ss]) recibes fotogramas del vídeo, cada uno con su minuto. "
     "Úsalos para comprobar las afirmaciones que dependen de lo que se ve: describe qué muestra realmente cada "
@@ -1073,6 +1081,13 @@ class Broker:
         if not self.hub.enabled:
             await m.reply("No tengo acceso al modelo local de Whisper para transcribir (hub sin configurar).")
             return
+        project = self.project_of_thread(m.message_thread_id)
+        root = self.cfg.yt_archive.get(project or "")
+        previous = youtube.find_archived(root, url) if root else None
+        if previous:
+            await m.reply(f"🔁 Este vídeo ya está en {esc(project)}: «{esc(clip(str(previous.get('title', '')), 120))}». "
+                          "No lo proceso de nuevo.")
+            return
         want_frames = self.cfg.yt_frames > 0
         note = await m.reply("🎬 Descargando el vídeo de YouTube…" if want_frames else
                              "🎬 Descargando el audio de YouTube…")
@@ -1086,8 +1101,9 @@ class Broker:
                     try:
                         video, title = await youtube.download_video(url, work / "dl", **dl)
                         audio = await videoframes.extract_audio(video, work / "audio.mp3")
+                        # Almacén: uno cada 1/fps s con su tiempo; solo se mira lo que el contexto pida.
                         frames = await videoframes.extract_frames(video, work / "frames", self.cfg.yt_fps,
-                                                                  self.cfg.yt_frames)
+                                                                  dedup=False)
                     except youtube.SignInRequired:
                         raise
                     except Exception as e:   # sin vídeo, al menos el audio
@@ -1111,9 +1127,19 @@ class Broker:
                 await self.edit_or_reply(note, m, "⚠️ La transcripción salió vacía.")
                 return
             archive_line = self.archive_youtube(m.message_thread_id, url, title, transcript)
+            content = f"Título del vídeo: {title}\nURL: {url}\n\nTranscripción:\n{transcript[:YT_TRANSCRIPT_CAP]}"
+            if frames:   # 1.ª pasada (solo texto): ¿en qué momentos se apoya el narrador en algo visual?
+                await self.edit_or_reply(note, m, f"🔍 Buscando gráficas que verificar en «{esc(clip(title, 120))}»…")
+                try:
+                    picks = await ask_claude(YT_MOMENTS_SYSTEM, content, self.cfg.summary_model, self.cfg.claude_bin)
+                    moments = videoframes.parse_times(picks)[:YT_MAX_MOMENTS]
+                except Exception as e:
+                    log.warning("elegir momentos del vídeo: %s", e)
+                    moments = []
+                frames = (videoframes.frames_near(frames, moments, before=2, after=YT_CHUNK_SECONDS + 2,
+                                                  cap=self.cfg.yt_frames) if moments else [])
             seen = f" con {len(frames)} fotogramas" if frames else ""
             await self.edit_or_reply(note, m, f"🧠 Analizando «{esc(clip(title, 120))}»{seen}…")
-            content = f"Título del vídeo: {title}\nURL: {url}\n\nTranscripción:\n{transcript[:YT_TRANSCRIPT_CAP]}"
             try:
                 if frames:
                     blocks: list[tuple[str, object]] = [("text", content)]

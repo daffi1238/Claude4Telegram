@@ -149,7 +149,7 @@ Pega un **enlace de YouTube** en cualquier tema y el bot descarga el audio (yt-d
 - **Cualquier tema:** puntos clave y conclusiones.
 - Y siempre termina con **🔎 Mi opinión**: una valoración objetiva de la verosimilitud del contenido, como segunda opinión.
 
-**Gráficas del vídeo.** Muchas afirmaciones dependen de gráficas que no salen en la transcripción. Por eso el bot descarga también el vídeo (≤480p), muestrea fotogramas (`C4T_YT_FPS`, 1 por segundo por defecto), **descarta los casi idénticos** (así no se queda con cientos de veces la cara del presentador) y le pasa a Claude hasta `C4T_YT_FRAMES` (24) imágenes, cada una con su minuto, junto a la transcripción con marcas `[mm:ss]`. Claude describe qué muestra realmente cada gráfica y si respalda o matiza lo que se dice, y te manda en un álbum los **fotogramas clave** en los que se apoya. `C4T_YT_FRAMES=0` vuelve al modo solo audio. Las imágenes gastan más tokens de la suscripción; el análisis usa `C4T_YT_MODEL` (`sonnet` por defecto).
+**Gráficas del vídeo.** Muchas afirmaciones dependen de gráficas que no salen en la transcripción. El bot descarga también el vídeo (≤480p) y **guarda un fotograma cada 2 s** con su minuto (`C4T_YT_FPS=0.5`), pero solo los mira si hace falta: en una **primera pasada** Claude lee la transcripción (con marcas `[mm:ss]` cada ~20 s) y señala los momentos en que el narrador se apoya en algo visual («como veis en este gráfico…»); solo los fotogramas de esos momentos (hasta 4 por momento y `C4T_YT_FRAMES`=24 en total) van a la **segunda pasada**, donde Claude describe qué muestra realmente cada gráfica y si respalda o matiza lo que se dice. Si el vídeo no se apoya en nada visual, no se envía ninguna imagen. Los fotogramas clave te llegan en un álbum. `C4T_YT_FRAMES=0` vuelve al modo solo audio; el análisis usa `C4T_YT_MODEL` (`sonnet`).
 
 Funciona en todos los temas sin tocar nada en los proyectos. Sin hub configurado, el bot avisa de que no tiene Whisper local.
 
@@ -255,7 +255,7 @@ Hace una copia de seguridad de `~/.claude/settings.json` y solo añade sus propi
 | `C4T_CHAT_MODEL` | Modelo para `/chat` y para reparar transcripciones (por defecto `qwen-coder`) |
 | `C4T_TTS_VOICE` | Voz del hub para la respuesta hablada (por defecto `ef_dora`) |
 | `C4T_YT_INTERFACE` | Interfaz por la que salen las descargas de YouTube (p. ej. la doméstica con una VPN activa) |
-| `C4T_YT_FRAMES` / `C4T_YT_FPS` | Fotogramas máximos que ve Claude (24; `0` = solo audio) y muestreo previo (1 por segundo) |
+| `C4T_YT_FRAMES` / `C4T_YT_FPS` | Fotogramas máximos que ve Claude (24; `0` = solo audio) y frecuencia del almacén (0.5 = uno cada 2 s) |
 | `C4T_YT_MODEL` | Modelo para analizar vídeos (por defecto `sonnet`) |
 | `C4T_YT_ARCHIVE` | `Proyecto=/ruta;Otro=/ruta`: guarda la transcripción de los vídeos enviados a ese tema en `<ruta>/.c4t/inbox/youtube/` |
 | `C4T_VOICE_SUMMARY` | Resumir con el hub la respuesta hablada a ≤1500 car. (por defecto `1`; `0` para leerla entera) |

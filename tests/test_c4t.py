@@ -50,6 +50,25 @@ class YouTube(unittest.TestCase):
         self.assertTrue(youtube.find_url("https://www.youtube.com/watch?v=abc123DEF_g"))
         self.assertTrue(youtube.find_url("https://www.youtube.com/shorts/aQ_bQ12cdef"))
 
+    def test_video_id_formatos(self):
+        for url in ("https://youtu.be/XY12zAB-9qQ?t=5", "https://www.youtube.com/watch?list=P&v=XY12zAB-9qQ",
+                    "https://www.youtube.com/shorts/XY12zAB-9qQ", "https://www.youtube.com/live/XY12zAB-9qQ?si=a"):
+            self.assertEqual(youtube.video_id(url), "XY12zAB-9qQ")
+        self.assertIsNone(youtube.video_id("https://vimeo.com/123"))
+
+    def test_detecta_video_ya_archivado(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            url = "https://www.youtube.com/watch?v=XY12zAB-9qQ"
+            self.assertIsNone(youtube.find_archived(root, url))
+            path = youtube.archive_transcript(root, url, "Bolsa", "hola")
+            self.assertEqual(youtube.find_archived(root, "https://youtu.be/XY12zAB-9qQ?t=9")["title"], "Bolsa")
+            self.assertIsNone(youtube.find_archived(root, "https://youtu.be/ZZ12zAB-9qQ"))
+            (path.parent / "processed").mkdir()
+            path.replace(path.parent / "processed" / path.name)
+            (path.parent / "roto.json").write_text("{no es json")
+            self.assertIsNotNone(youtube.find_archived(root, url))
+
     def test_archiva_transcripcion(self):
         import json
         import tempfile
@@ -78,6 +97,17 @@ class YouTube(unittest.TestCase):
 
 
 class VideoFrames(unittest.TestCase):
+    def test_parse_times(self):
+        self.assertEqual(videoframes.parse_times("02:15 — gráfica\n1:02:05 tabla\n02:15 otra"), [135, 3725])
+        self.assertEqual(videoframes.parse_times("ninguno"), [])
+
+    def test_frames_near(self):
+        store = [(Path(f"{i}.jpg"), float(i * 2)) for i in range(60)]   # uno cada 2 s, 2 min
+        got = videoframes.frames_near(store, [40], before=2, after=22, cap=3)
+        self.assertEqual(len(got), 3)
+        self.assertTrue(all(38 <= t <= 62 for _, t in got))
+        self.assertEqual(videoframes.frames_near(store, [], cap=5), [])
+
     def test_mmss(self):
         self.assertEqual(videoframes.mmss(0), "00:00")
         self.assertEqual(videoframes.mmss(135.7), "02:15")

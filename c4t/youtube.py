@@ -12,6 +12,7 @@ from pathlib import Path
 from .inbox import inbox_dir, stamped
 
 URL_RE = re.compile(r"https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?[^\s]*v=|shorts/|live/)|youtu\.be/)[\w\-]+[^\s]*")
+VIDEO_ID_RE = re.compile(r"(?:[?&]v=|youtu\.be/|/shorts/|/live/)([\w\-]{11})(?![\w\-])")
 SIGN_IN = ("sign in to confirm", "confirm you’re not a bot", "confirm you're not a bot", "cookies")
 DOWNLOAD_TIMEOUT = 600
 
@@ -28,6 +29,27 @@ def yt_dlp_bin() -> str | None:
 
 class SignInRequired(RuntimeError):
     """yt-dlp pide cookies de una sesión iniciada."""
+
+
+def video_id(url: str) -> str | None:
+    m = VIDEO_ID_RE.search(url or "")
+    return m.group(1) if m else None
+
+
+def find_archived(root: str, url: str) -> dict | None:
+    """Transcripción ya archivada de este vídeo (pendiente o procesada), o None si es nuevo."""
+    wanted = video_id(url)
+    if not wanted:
+        return None
+    folder = Path(root) / ".c4t" / "inbox" / "youtube"
+    for path in (*folder.glob("*.json"), *folder.glob("processed/*.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and video_id(str(data.get("url", ""))) == wanted:
+            return data
+    return None
 
 
 def archive_transcript(root: str, url: str, title: str, transcript: str) -> Path:

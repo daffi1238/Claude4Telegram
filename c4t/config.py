@@ -60,7 +60,7 @@ class Config:
     yt_max_minutes: int = 120       # vídeos más largos se rechazan (0 = sin límite)
     yt_interface: str = ""          # interfaz de salida para YouTube (p. ej. la doméstica con VPN activa)
     yt_frames: int = 24             # fotogramas del vídeo que ve Claude (gráficas); 0 = solo audio
-    yt_fps: float = 1.0             # muestreo antes de quitar repetidos
+    yt_fps: float = 0.5             # almacén de fotogramas: uno cada 1/fps s (0.5 = cada 2 s)
     yt_model: str = "sonnet"        # modelo para el análisis de vídeos (con imágenes conviene uno bueno)
     yt_archive: dict[str, str] = field(default_factory=dict)  # proyecto -> carpeta donde guardar transcripciones
     # /ytlogin: navegador efímero (noVNC + cloudflared quick tunnel) para iniciar sesión en YouTube.
@@ -113,7 +113,7 @@ def load_config() -> Config:
         yt_max_minutes=int(env.get("C4T_YT_MAX_MINUTES", "120")),
         yt_interface=env.get("C4T_YT_INTERFACE", ""),
         yt_frames=int(env.get("C4T_YT_FRAMES", "24")),
-        yt_fps=float(env.get("C4T_YT_FPS", "1")),
+        yt_fps=float(env.get("C4T_YT_FPS", "0.5")),
         yt_model=env.get("C4T_YT_MODEL", "sonnet"),
         yt_archive=parse_yt_archive(env.get("C4T_YT_ARCHIVE", "")),
         yt_login_seconds=int(env.get("C4T_YT_LOGIN_SECONDS", "300")),

@@ -41,10 +41,13 @@ async def split_audio(audio: Path, out_dir: Path, seconds: int) -> list[tuple[Pa
     return [(p, i * seconds) for i, p in enumerate(parts)]
 
 
-async def extract_frames(video: Path, out_dir: Path, fps: float, max_frames: int) -> list[tuple[Path, float]]:
-    """Fotogramas distintos entre sí con su segundo. Si salen más de `max_frames`, se reparten uniformes."""
+async def extract_frames(video: Path, out_dir: Path, fps: float, max_frames: int = 0,
+                         dedup: bool = True) -> list[tuple[Path, float]]:
+    """Fotogramas con su segundo. Con `dedup` se quitan los casi idénticos; si salen más de `max_frames`,
+    se reparten uniformes. Sin `dedup` es el almacén completo (uno cada 1/fps s) para elegir después."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    vf = f"fps={fps},mpdecimate=hi=64*12:lo=64*5:frac=0.33,scale={FRAME_WIDTH}:-2,showinfo"
+    decimate = "mpdecimate=hi=64*12:lo=64*5:frac=0.33," if dedup else ""
+    vf = f"fps={fps},{decimate}scale={FRAME_WIDTH}:-2,showinfo"
     code, err = await _ffmpeg("-y", "-i", str(video), "-vf", vf, "-fps_mode", "vfr", "-q:v", "4",
                               str(out_dir / "%05d.jpg"))
     if code != 0:
@@ -56,6 +59,33 @@ async def extract_frames(video: Path, out_dir: Path, fps: float, max_frames: int
         step = len(frames) / max_frames
         frames = [frames[int(i * step)] for i in range(max_frames)]
     return frames
+
+
+def parse_times(text: str) -> list[int]:
+    """Segundos de todas las marcas «mm:ss» / «h:mm:ss» de un texto, en orden y sin repetir."""
+    out = []
+    for m in re.finditer(r"\b(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\b", text):
+        h, mi, s = int(m.group(1) or 0), int(m.group(2)), int(m.group(3))
+        if s < 60:
+            t = h * 3600 + mi * 60 + s
+            if t not in out:
+                out.append(t)
+    return out
+
+
+def frames_near(frames: list[tuple[Path, float]], moments: list[int], before: float = 2,
+                after: float = 6, cap: int = 24, per_moment: int = 4) -> list[tuple[Path, float]]:
+    """Fotogramas del almacén en [t-before, t+after] de cada momento (la gráfica suele salir justo tras
+    mencionarla), sin repetir, en orden temporal y con tope `cap` repartido entre momentos."""
+    picked: list[tuple[Path, float]] = []
+    per = max(1, min(per_moment, cap // max(1, len(moments))))
+    for t in moments:
+        near = [f for f in frames if t - before <= f[1] <= t + after and f not in picked]
+        if len(near) > per:   # repartidos por la ventana, no solo los primeros
+            step = len(near) / per
+            near = [near[int(i * step)] for i in range(per)]
+        picked += near
+    return sorted(picked, key=lambda f: f[1])[:cap]
 
 
 def mmss(seconds: float) -> str:
