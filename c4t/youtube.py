@@ -52,7 +52,29 @@ def find_archived(root: str, url: str) -> dict | None:
     return None
 
 
-def archive_transcript(root: str, url: str, title: str, transcript: str) -> Path:
+def _iso_day(value: object) -> str | None:
+    text = str(value or "")
+    return f"{text[:4]}-{text[4:6]}-{text[6:]}" if re.fullmatch(r"\d{8}", text) else None
+
+
+def read_video_info(folder: Path) -> dict:
+    """Datos del vídeo que yt-dlp dejó en *.info.json bajo folder; {} si no hay."""
+    files = sorted(folder.rglob("*.info.json"), key=lambda f: f.stat().st_mtime)
+    if not files:
+        return {}
+    try:
+        info = json.loads(files[-1].read_text())
+    except (OSError, ValueError):
+        return {}
+    return {
+        "upload_date": _iso_day(info.get("upload_date")),
+        "release_date": _iso_day(info.get("release_date")),
+        "channel": info.get("channel") or info.get("uploader"),
+        "duration_s": info.get("duration"),
+    }
+
+
+def archive_transcript(root: str, url: str, title: str, transcript: str, info: dict | None = None) -> Path:
     """Deja la transcripción en <root>/.c4t/inbox/youtube/ para que el proyecto la procese.
 
     Se escribe a un temporal y se renombra: quien lea *.json nunca verá un archivo a medias.
@@ -62,7 +84,7 @@ def archive_transcript(root: str, url: str, title: str, transcript: str) -> Path
     dest = stamped(folder, f"{title[:80]}.json")
     tmp = dest.with_suffix(".tmp")
     tmp.write_text(json.dumps({
-        "url": url, "title": title, "transcript": transcript,
+        **(info or {}), "url": url, "title": title, "transcript": transcript,
         "received_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }, ensure_ascii=False))
     os.replace(tmp, dest)
@@ -82,7 +104,7 @@ async def _ytdlp(url: str, dest_dir: Path, fmt_args: list[str], cookies: str, co
     if not binary:
         raise RuntimeError("yt-dlp no está instalado")
     out = str(dest_dir / "%(title).150B [%(id)s].%(ext)s")
-    cmd = [binary, *fmt_args, "--no-playlist", "--no-progress", "-o", out]
+    cmd = [binary, *fmt_args, "--no-playlist", "--no-progress", "--write-info-json", "-o", out]
     if max_minutes:
         cmd += ["--match-filter", f"duration<={max_minutes * 60}"]
     if cookies:
@@ -101,7 +123,7 @@ async def _ytdlp(url: str, dest_dir: Path, fmt_args: list[str], cookies: str, co
         proc.kill()
         raise RuntimeError("la descarga tardó demasiado") from None
     log = out_bytes.decode(errors="replace")
-    files = sorted(p for p in dest_dir.iterdir() if p.is_file() and not p.name.endswith((".part", ".ytdl")))
+    files = sorted(p for p in dest_dir.iterdir() if p.is_file() and not p.name.endswith((".part", ".ytdl", ".info.json")))
     if proc.returncode != 0 or not files:
         if any(s in log.lower() for s in SIGN_IN):
             raise SignInRequired(log.strip()[-300:])

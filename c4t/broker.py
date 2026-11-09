@@ -41,6 +41,7 @@ from . import voice
 from .summary import ago, md_bold, render_line, render_summary, transcript_of
 from .ai_summary import ask_claude, ask_claude_images, summarize
 from . import netbind, videoframes, youtube
+from .ytpending import MAX_ATTEMPTS, PendingVideos, serialize_message
 
 log = logging.getLogger("c4t")
 
@@ -65,6 +66,7 @@ VOICE_SUMMARY_SYSTEM = (
 VOICE_SUMMARY_INPUT = 6000   # caracteres de la respuesta que se mandan a resumir (contexto acotado del hub)
 CHAT_MSGS_CAP = 200          # respuestas de /chat recordadas para continuar al responderlas
 OFFERED_CAP = 50             # textos sueltos ofrecidos como instrucción con un botón
+HTTP_SHUTDOWN_SECONDS = 3     # al parar, no esperar a los hooks que siguen abiertos (pueden durar horas)
 YT_CHUNK_SECONDS = 20         # tramos de audio: cada marca [mm:ss] tiene esta precisión
 YT_MAX_MOMENTS = 8            # momentos visuales que se revisan como mucho
 YT_MOMENTS_SYSTEM = (
@@ -153,6 +155,7 @@ class Broker:
         self.ytlogin_pgid: int | None = None                         # su grupo de procesos (para matarlo entero)
         self.yt_proxy: str = ""                                        # proxy SOCKS local por la red doméstica
         self.yt_proxy_server: asyncio.AbstractServer | None = None
+        self.yt_pending = PendingVideos(cfg.state_dir / "yt_pending")
         self.ytlogin_marks: list[str] | None = None                  # [port, vnc, display, profile] para matar por marcador
 
     # ------------------------------------------------------------------ Telegram helpers
@@ -1029,14 +1032,14 @@ class Broker:
             log.info("YouTube sale por %s (%s)", self.cfg.yt_interface, self.yt_proxy)
         return self.yt_proxy
 
-    def archive_youtube(self, thread_id: int | None, url: str, title: str, transcript: str) -> str:
+    def archive_youtube(self, thread_id: int | None, url: str, title: str, transcript: str, info: dict) -> str:
         """Guarda la transcripción si el tema tiene archivo configurado; devuelve la línea para el usuario."""
         project = self.project_of_thread(thread_id)
         root = self.cfg.yt_archive.get(project or "")
         if not root:
             return ""
         try:
-            youtube.archive_transcript(root, url, title, transcript)
+            youtube.archive_transcript(root, url, title, transcript, info)
         except Exception as e:
             log.warning("archivar transcripción de YouTube: %s", e)
             return f"⚠️ No pude guardar la transcripción en {esc(project)}: {esc(clip(str(e), 200))}\n"
@@ -1076,6 +1079,37 @@ class Broker:
         return "\n".join(lines)
 
     async def handle_youtube(self, m: Message, url: str) -> None:
+        """Procesa el vídeo; si un reinicio lo corta, queda en disco para retomarlo al arrancar."""
+        path = None
+        try:
+            path = self.yt_pending.add(m.chat.id, m.message_id, url, serialize_message(m))
+        except Exception as e:   # guardarlo es una red de seguridad: nunca debe impedir procesar el vídeo
+            log.warning("no pude guardar el vídeo en curso: %s", e)
+        cancelled = False
+        try:
+            await self.process_youtube(m, url)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if path and not cancelled:
+                path.unlink(missing_ok=True)
+
+    async def resume_youtube(self) -> None:
+        """Retoma, uno a uno, los vídeos que un reinicio dejó a medias."""
+        for path, entry in self.yt_pending.load():
+            try:
+                m = Message.model_validate_json(entry["message"]).as_(self.bot)
+                if entry.get("attempts", 0) >= MAX_ATTEMPTS:
+                    path.unlink(missing_ok=True)
+                    await m.reply("⚠️ No pude terminar este vídeo tras varios intentos. Reenvíalo si aún lo quieres.")
+                    continue
+                await m.reply("🔁 Retomo este vídeo: un reinicio del bot lo dejó a medias.")
+                await self.handle_youtube(m, entry["url"])
+            except Exception as e:
+                log.warning("retomar vídeo de YouTube %s: %s", path.name, e)
+
+    async def process_youtube(self, m: Message, url: str) -> None:
         """Enlace de YouTube → vídeo/audio (yt-dlp) → transcripción con tiempos (hub) + fotogramas →
         resumen temático de Claude que comprueba las gráficas contra lo que se dice."""
         if not self.hub.enabled:
@@ -1126,7 +1160,8 @@ class Broker:
             if not transcript:
                 await self.edit_or_reply(note, m, "⚠️ La transcripción salió vacía.")
                 return
-            archive_line = self.archive_youtube(m.message_thread_id, url, title, transcript)
+            archive_line = self.archive_youtube(m.message_thread_id, url, title, transcript,
+                                                youtube.read_video_info(work))
             content = f"Título del vídeo: {title}\nURL: {url}\n\nTranscripción:\n{transcript[:YT_TRANSCRIPT_CAP]}"
             if frames:   # 1.ª pasada (solo texto): ¿en qué momentos se apoya el narrador en algo visual?
                 await self.edit_or_reply(note, m, f"🔍 Buscando gráficas que verificar en «{esc(clip(title, 120))}»…")
@@ -1300,7 +1335,7 @@ async def run(cfg: Config) -> None:
     app.router.add_post("/hook", broker.http_hook)
     app.router.add_post("/send", broker.http_send)
     app.router.add_get("/health", lambda _: web.json_response({"ok": True, "away": broker.state.away}))
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, shutdown_timeout=HTTP_SHUTDOWN_SECONDS)
     await runner.setup()
     try:
         await web.TCPSite(runner, cfg.host, cfg.port).start()
@@ -1325,8 +1360,10 @@ async def run(cfg: Config) -> None:
 
     dp = Dispatcher()
     dp.include_router(broker.router())
+    resume = asyncio.create_task(broker.resume_youtube())   # referencia viva mientras dura el polling
     try:
         await dp.start_polling(broker.bot, allowed_updates=["message", "callback_query"])
     finally:
+        resume.cancel()
         broker.stop_ytlogin()   # no dejar un navegador/túnel abierto si se para el broker
         await runner.cleanup()

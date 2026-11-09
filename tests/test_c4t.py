@@ -43,6 +43,73 @@ class Speakable(unittest.TestCase):
         self.assertEqual(voice.speakable("   \n  "), "")
 
 
+class VideosPendientes(unittest.TestCase):
+    def test_cuenta_intentos_y_se_puede_retirar(self):
+        import tempfile
+        from c4t.ytpending import PendingVideos
+        with tempfile.TemporaryDirectory() as folder:
+            pending = PendingVideos(Path(folder) / "p")
+            path = pending.add(-100, 7, "https://youtu.be/XY12zAB-9qQ", "{}")
+            pending.add(-100, 7, "https://youtu.be/XY12zAB-9qQ", "{}")
+            self.assertEqual([e["attempts"] for _, e in pending.load()], [2])
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            (Path(folder) / "p" / "roto.json").write_text("{no es json")
+            self.assertEqual(len(pending.load()), 1)
+            path.unlink()
+            self.assertEqual(pending.load(), [])
+
+    def _real(self):
+        """Mensaje con la forma que entrega Telegram, incluida la previsualización del enlace."""
+        from aiogram.types import Message
+        return Message.model_validate({
+            "message_id": 7, "date": 1794209312, "chat": {"id": -100, "type": "supergroup", "is_forum": True},
+            "message_thread_id": 5, "is_topic_message": True, "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "https://youtu.be/XY12zAB-9qQ",
+            "entities": [{"type": "url", "offset": 0, "length": 28}],
+            "link_preview_options": {"url": "https://youtu.be/XY12zAB-9qQ"},
+        })
+
+    def test_mensaje_real_sobrevive_al_guardado(self):
+        from aiogram import Bot
+        from aiogram.types import Message
+        from c4t.ytpending import serialize_message
+        bot = Bot("42:TEST")
+        restored = Message.model_validate_json(serialize_message(self._real())).as_(bot)
+        self.assertEqual((restored.chat.id, restored.message_thread_id, restored.is_topic_message), (-100, 5, True))
+        self.assertEqual(restored.text, "https://youtu.be/XY12zAB-9qQ")
+        self.assertIs(restored.bot, bot)
+
+
+class GuardadoNoBloquea(unittest.IsolatedAsyncioTestCase):
+    async def test_fallo_al_guardar_no_impide_procesar(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from c4t.broker import Broker
+        broker = MagicMock()
+        broker.yt_pending.add.side_effect = OSError("disco lleno")
+        broker.process_youtube = AsyncMock()
+        message = VideosPendientes()._real()
+        await Broker.handle_youtube(broker, message, "https://youtu.be/XY12zAB-9qQ")
+        broker.process_youtube.assert_awaited_once()
+
+    async def test_se_retira_al_terminar_y_se_conserva_si_se_cancela(self):
+        import asyncio
+        import tempfile
+        from unittest.mock import AsyncMock, MagicMock
+        from c4t.broker import Broker
+        from c4t.ytpending import PendingVideos
+        with tempfile.TemporaryDirectory() as folder:
+            broker = MagicMock()
+            broker.yt_pending = PendingVideos(Path(folder))
+            broker.process_youtube = AsyncMock()
+            message = VideosPendientes()._real()
+            await Broker.handle_youtube(broker, message, "https://youtu.be/XY12zAB-9qQ")
+            self.assertEqual(broker.yt_pending.load(), [])
+            broker.process_youtube = AsyncMock(side_effect=asyncio.CancelledError)
+            with self.assertRaises(asyncio.CancelledError):
+                await Broker.handle_youtube(broker, message, "https://youtu.be/XY12zAB-9qQ")
+            self.assertEqual(len(broker.yt_pending.load()), 1)
+
+
 class YouTube(unittest.TestCase):
     def test_detecta(self):
         self.assertEqual(youtube.find_url("mira https://youtu.be/XY12zAB-9qQ?t=5 wow"),
@@ -55,6 +122,23 @@ class YouTube(unittest.TestCase):
                     "https://www.youtube.com/shorts/XY12zAB-9qQ", "https://www.youtube.com/live/XY12zAB-9qQ?si=a"):
             self.assertEqual(youtube.video_id(url), "XY12zAB-9qQ")
         self.assertIsNone(youtube.video_id("https://vimeo.com/123"))
+
+    def test_lee_fechas_del_video_y_las_archiva(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root) / "dl"
+            work.mkdir()
+            self.assertEqual(youtube.read_video_info(work), {})
+            (work / "v.info.json").write_text(json.dumps(
+                {"upload_date": "20261107", "release_date": None, "channel": "Canal", "duration": 60}))
+            info = youtube.read_video_info(Path(root))
+            self.assertEqual(info, {"upload_date": "2026-11-07", "release_date": None,
+                                    "channel": "Canal", "duration_s": 60})
+            path = youtube.archive_transcript(root, "https://youtu.be/XY12zAB-9qQ", "T", "hola", info)
+            saved = json.loads(path.read_text())
+            self.assertEqual((saved["upload_date"], saved["channel"], saved["title"]), ("2026-11-07", "Canal", "T"))
+            self.assertIn("received_at", saved)
 
     def test_detecta_video_ya_archivado(self):
         import tempfile
